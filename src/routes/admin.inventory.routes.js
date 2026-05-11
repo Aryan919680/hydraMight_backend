@@ -217,27 +217,48 @@ router.put('/:id', async (req, res) => {
 
     const diff = nextAvailable - Number(current.available_stock);
 
-    await db.query(
-      `insert into inventory_transactions
-       (
-        product_id,
-        location_id,
-        transaction_type,
-        quantity,
-        reference_type,
-        remarks,
-        created_by
-       )
-       values ($1,$2,$3,$4,'manual',$5,$6)`,
-      [
-        current.product_id,
-        current.location_id,
-        diff >= 0 ? 'stock_in' : 'stock_out',
-        Math.abs(diff),
-        remarks || 'Inventory updated by admin',
-        req.user.id
-      ]
-    );
+if (diff !== 0) {
+  await db.query(
+    `insert into inventory_transactions
+     (
+      product_id,
+      location_id,
+      transaction_type,
+      quantity,
+      reference_type,
+      remarks,
+      created_by
+     )
+     values ($1,$2,$3,$4,'manual',$5,$6)`,
+    [
+      current.product_id,
+      current.location_id,
+      diff > 0 ? 'stock_in' : 'stock_out',
+      Math.abs(diff),
+      remarks || 'Inventory updated by admin',
+      req.user.id
+    ]
+  );
+} else if (remarks) {
+  await db.query(
+    `insert into audit_logs
+     (
+      user_id,
+      action,
+      module,
+      record_id,
+      old_data,
+      new_data
+     )
+     values ($1,'UPDATE','INVENTORY',$2,$3,$4)`,
+    [
+      req.user.id,
+      req.params.id,
+      current,
+      result.rows[0]
+    ]
+  );
+}
 
     res.json({
       success: true,
