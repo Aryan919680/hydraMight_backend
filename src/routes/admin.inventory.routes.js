@@ -9,27 +9,40 @@ router.use(authenticate, authorize('admin', 'operator'));
 // Get inventory for all products
 router.get('/', async (req, res) => {
   try {
-    const result = await db.query(
-      `select
-        i.id,
-        i.product_id,
-        p.name as product_name,
-        p.sku,
-        i.location_id,
-        sl.name as location_name,
-        i.available_stock,
-        i.reserved_stock,
-        i.min_stock_level,
-        i.is_out_of_stock,
-        i.is_active,
-        i.updated_at
-       from inventory i
-       join products p on p.id = i.product_id
-       left join service_locations sl on sl.id = i.location_id
-       where i.is_active = true
-       order by i.updated_at desc`,
-      []
-    );
+const result = await db.query(
+  `select
+    i.id,
+    i.product_id,
+
+    p.name as product_name,
+    p.sku,
+    p.portal_type,
+    p.quantity_value,
+    p.quantity_unit,
+
+    i.location_id,
+    sl.name as location_name,
+
+    i.available_stock,
+    i.reserved_stock,
+    i.min_stock_level,
+    i.is_out_of_stock,
+    i.is_active,
+    i.updated_at
+
+   from inventory i
+
+   join products p
+     on p.id = i.product_id
+
+   left join service_locations sl
+     on sl.id = i.location_id
+
+   where i.is_active = true
+
+   order by i.updated_at desc`,
+  []
+);
 
     res.json({ success: true, data: result.rows });
   } catch (error) {
@@ -41,20 +54,32 @@ router.get('/', async (req, res) => {
 // Get inventory by product
 router.get('/product/:productId', async (req, res) => {
   try {
-    const result = await db.query(
-      `select
-        i.*,
-        p.name as product_name,
-        p.sku,
-        sl.name as location_name
-       from inventory i
-       join products p on p.id = i.product_id
-       left join service_locations sl on sl.id = i.location_id
-       where i.product_id = $1
-       and i.is_active = true
-       order by i.updated_at desc`,
-      [req.params.productId]
-    );
+const result = await db.query(
+  `select
+    i.*,
+
+    p.name as product_name,
+    p.sku,
+    p.portal_type,
+    p.quantity_value,
+    p.quantity_unit,
+
+    sl.name as location_name
+
+   from inventory i
+
+   join products p
+     on p.id = i.product_id
+
+   left join service_locations sl
+     on sl.id = i.location_id
+
+   where i.product_id = $1
+   and i.is_active = true
+
+   order by i.updated_at desc`,
+  [req.params.productId]
+);
 
     res.json({ success: true, data: result.rows });
   } catch (error) {
