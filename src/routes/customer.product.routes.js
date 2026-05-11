@@ -5,12 +5,13 @@ const router = express.Router();
 
 router.get('/', async (req, res) => {
   try {
-    const {
-      location_id,
-      category_slug,
-      search,
-      featured
-    } = req.query;
+   const {
+  location_id,
+  category_slug,
+  search,
+  featured,
+  portal_type
+} = req.query;
 
     const limit = Math.min(Number(req.query.limit) || 20, 100);
     const offset = Number(req.query.offset) || 0;
@@ -22,6 +23,10 @@ router.get('/', async (req, res) => {
       params.push(location_id);
       conditions.push(`location_id = $${params.length}`);
     }
+    if (portal_type) {
+  params.push(portal_type);
+  conditions.push(`(portal_type = $${params.length} or portal_type = 'both')`);
+}
 
     if (category_slug) {
       params.push(category_slug);

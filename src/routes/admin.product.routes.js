@@ -2,9 +2,10 @@ const express = require('express');
 const db = require('../config/db');
 const { authenticate, authorize } = require('../middleware/auth.middleware');
 const { createSlug } = require('../utils/slug');
-const { uploadProductImage } = require('../middleware/upload.middleware');
 const router = express.Router();
-
+const path = require('path');
+const supabase = require('../config/supabase');
+const { uploadProductImage } = require('../middleware/upload.middleware');
 router.use(authenticate, authorize('admin', 'operator'));
 
 /**
@@ -18,25 +19,28 @@ router.post('/', async (req, res) => {
   const client = await db.pool.connect();
 
   try {
-    const {
-      category_id,
-      name,
-      slug,
-      sku,
-      short_description,
-      description,
-      brand,
-      unit,
-      weight,
-      is_featured,
-      images,
-      location_id,
-      mrp,
-      selling_price,
-      currency,
-      available_stock,
-      min_stock_level
-    } = req.body;
+   const {
+  category_id,
+  name,
+  slug,
+  sku,
+  short_description,
+  description,
+  brand,
+  unit,
+  weight,
+  quantity_value,
+  quantity_unit,
+  portal_type,
+  is_featured,
+  images,
+  location_id,
+  mrp,
+  selling_price,
+  currency,
+  available_stock,
+  min_stock_level
+} = req.body;
 
     if (!category_id || !name || !location_id || mrp === undefined || selling_price === undefined) {
       return res.status(400).json({
@@ -45,27 +49,75 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const finalPortalType = portal_type || 'household';
+
+if (!['household', 'commercial', 'both'].includes(finalPortalType)) {
+  return res.status(400).json({
+    success: false,
+    message: 'Invalid portal_type'
+  });
+}
+
+if (finalPortalType === 'household' && !['ml', 'litre'].includes(quantity_unit)) {
+  return res.status(400).json({
+    success: false,
+    message: 'Household products must use ml or litre'
+  });
+}
+
+if (finalPortalType === 'commercial' && quantity_unit !== 'gallon') {
+  return res.status(400).json({
+    success: false,
+    message: 'Commercial products must use gallon'
+  });
+}
+
+if (finalPortalType === 'both' && !['ml', 'litre', 'gallon'].includes(quantity_unit)) {
+  return res.status(400).json({
+    success: false,
+    message: 'Invalid quantity unit'
+  });
+}
+
     await client.query('BEGIN');
 
-    const productResult = await client.query(
-      `insert into products
-       (category_id, name, slug, sku, short_description, description, brand, unit, weight, is_featured, created_by)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       returning *`,
-      [
-        category_id,
-        name,
-        slug || createSlug(name),
-        sku || null,
-        short_description || null,
-        description || null,
-        brand || null,
-        unit || null,
-        weight || null,
-        Boolean(is_featured),
-        req.user.id
-      ]
-    );
+ const productResult = await client.query(
+  `insert into products
+   (
+    category_id,
+    name,
+    slug,
+    sku,
+    short_description,
+    description,
+    brand,
+    unit,
+    weight,
+    quantity_value,
+    quantity_unit,
+    portal_type,
+    is_featured,
+    created_by
+   )
+   values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+   returning *`,
+  [
+    category_id,
+    name,
+    slug || createSlug(name),
+    sku || null,
+    short_description || null,
+    description || null,
+    brand || null,
+    unit || null,
+    weight || null,
+    quantity_value || null,
+    quantity_unit || null,
+    finalPortalType,
+    Boolean(is_featured),
+    req.user.id
+  ]
+);
 
     const product = productResult.rows[0];
 
@@ -73,18 +125,40 @@ router.post('/', async (req, res) => {
       for (let index = 0; index < images.length; index++) {
         const img = images[index];
 
-        await client.query(
-          `insert into product_images
-           (product_id, image_url, alt_text, is_primary, display_order)
-           values ($1,$2,$3,$4,$5)`,
-          [
-            product.id,
-            img.image_url,
-            img.alt_text || null,
-            index === 0 ? true : Boolean(img.is_primary),
-            img.display_order || index
-          ]
-        );
+       if (Array.isArray(images) && images.length > 0) {
+  for (let index = 0; index < images.length; index++) {
+    const img = images[index];
+
+    await client.query(
+      `insert into product_images
+       (
+        product_id,
+        image_url,
+        storage_bucket,
+        storage_path,
+        file_name,
+        mime_type,
+        file_size,
+        alt_text,
+        is_primary,
+        display_order
+       )
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        product.id,
+        img.image_url,
+        img.storage_bucket || 'product-images',
+        img.storage_path || null,
+        img.file_name || null,
+        img.mime_type || null,
+        img.file_size || null,
+        img.alt_text || null,
+        index === 0 ? true : Boolean(img.is_primary),
+        img.display_order || index
+      ]
+    );
+  }
+}
       }
     }
 
@@ -215,40 +289,49 @@ router.put('/:id', async (req, res) => {
       unit,
       weight,
       is_active,
-      is_featured
+      is_featured,
+      quantity_value,
+quantity_unit,
+portal_type
     } = req.body;
 
-    const result = await db.query(
-      `update products
-       set category_id = coalesce($1, category_id),
-           name = coalesce($2, name),
-           slug = coalesce($3, slug),
-           sku = coalesce($4, sku),
-           short_description = coalesce($5, short_description),
-           description = coalesce($6, description),
-           brand = coalesce($7, brand),
-           unit = coalesce($8, unit),
-           weight = coalesce($9, weight),
-           is_active = coalesce($10, is_active),
-           is_featured = coalesce($11, is_featured),
-           updated_at = now()
-       where id = $12
-       returning *`,
-      [
-        category_id || null,
-        name || null,
-        slug || null,
-        sku || null,
-        short_description || null,
-        description || null,
-        brand || null,
-        unit || null,
-        weight || null,
-        is_active,
-        is_featured,
-        req.params.id
-      ]
-    );
+   const result = await db.query(
+  `update products
+   set category_id = coalesce($1, category_id),
+       name = coalesce($2, name),
+       slug = coalesce($3, slug),
+       sku = coalesce($4, sku),
+       short_description = coalesce($5, short_description),
+       description = coalesce($6, description),
+       brand = coalesce($7, brand),
+       unit = coalesce($8, unit),
+       weight = coalesce($9, weight),
+       quantity_value = coalesce($10, quantity_value),
+       quantity_unit = coalesce($11, quantity_unit),
+       portal_type = coalesce($12, portal_type),
+       is_active = coalesce($13, is_active),
+       is_featured = coalesce($14, is_featured),
+       updated_at = now()
+   where id = $15
+   returning *`,
+  [
+    category_id || null,
+    name || null,
+    slug || null,
+    sku || null,
+    short_description || null,
+    description || null,
+    brand || null,
+    unit || null,
+    weight || null,
+    quantity_value || null,
+    quantity_unit || null,
+    portal_type || null,
+    is_active,
+    is_featured,
+    req.params.id
+  ]
+);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Product not found' });
@@ -371,7 +454,6 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-
 router.post(
   '/upload-image',
   uploadProductImage.single('image'),
@@ -384,11 +466,45 @@ router.post(
         });
       }
 
-      const imageUrl = `${req.protocol}://${req.get('host')}/uploads/products/${req.file.filename}`;
+      const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'product-images';
+
+      const ext = path.extname(req.file.originalname);
+      const safeName = req.file.originalname
+        .replace(ext, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+      const fileName = `${Date.now()}-${safeName}${ext}`;
+      const storagePath = `products/${fileName}`;
+
+      const { error } = await supabase.storage
+        .from(bucket)
+        .upload(storagePath, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false
+        });
+
+      if (error) {
+        console.error('Supabase upload error:', error);
+        return res.status(500).json({
+          success: false,
+          message: error.message || 'Failed to upload image'
+        });
+      }
+
+      const { data } = supabase.storage
+        .from(bucket)
+        .getPublicUrl(storagePath);
 
       res.status(201).json({
         success: true,
-        image_url: imageUrl
+        image_url: data.publicUrl,
+        storage_bucket: bucket,
+        storage_path: storagePath,
+        file_name: fileName,
+        mime_type: req.file.mimetype,
+        file_size: req.file.size
       });
     } catch (error) {
       console.error('Upload product image error:', error);
