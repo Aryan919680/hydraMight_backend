@@ -35,6 +35,7 @@ router.post('/', async (req, res) => {
   is_featured,
   images,
   location_id,
+location_ids,
   mrp,
   selling_price,
   currency,
@@ -42,12 +43,19 @@ router.post('/', async (req, res) => {
   min_stock_level
 } = req.body;
 
-    if (!category_id || !name || !location_id || mrp === undefined || selling_price === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'category_id, name, location_id, mrp and selling_price are required'
-      });
-    }
+   const finalLocationIds =
+  Array.isArray(location_ids) && location_ids.length > 0
+    ? location_ids
+    : location_id
+      ? [location_id]
+      : [];
+
+if (!category_id || !name || finalLocationIds.length === 0 || mrp === undefined || selling_price === undefined) {
+  return res.status(400).json({
+    success: false,
+    message: 'category_id, name, location_ids, mrp and selling_price are required'
+  });
+}
 
     const finalPortalType = portal_type || 'household';
 
@@ -162,25 +170,64 @@ if (finalPortalType === 'both' && !['ml', 'litre', 'gallon'].includes(quantity_u
       }
     }
 
-    await client.query(
-      `insert into product_prices
-       (product_id, location_id, mrp, selling_price, currency, is_active)
-       values ($1,$2,$3,$4,$5,true)`,
-      [product.id, location_id, mrp, selling_price, currency || 'INR']
-    );
+   for (const locId of finalLocationIds) {
+  await client.query(
+    `insert into product_prices
+     (product_id, location_id, mrp, selling_price, currency, is_active)
+     values ($1,$2,$3,$4,$5,true)`,
+    [product.id, locId, mrp, selling_price, currency || 'INR']
+  );
+}
 
-    await client.query(
-      `insert into inventory
-       (product_id, location_id, available_stock, reserved_stock, min_stock_level, is_out_of_stock)
-       values ($1,$2,$3,0,$4,$5)`,
-      [
-        product.id,
-        location_id,
-        available_stock || 0,
-        min_stock_level || 0,
-        Number(available_stock || 0) <= 0
-      ]
-    );
+  for (const locId of finalLocationIds) {
+  await client.query(
+    `insert into inventory
+     (
+      product_id,
+      location_id,
+      available_stock,
+      reserved_stock,
+      min_stock_level,
+      is_out_of_stock,
+      is_active
+     )
+     values ($1,$2,$3,0,$4,$5,true)
+     on conflict (product_id, location_id)
+     do update set
+       available_stock = excluded.available_stock,
+       min_stock_level = excluded.min_stock_level,
+       is_out_of_stock = excluded.is_out_of_stock,
+       is_active = true,
+       updated_at = now()`,
+    [
+      product.id,
+      locId,
+      available_stock || 0,
+      min_stock_level || 0,
+      Number(available_stock || 0) <= 0
+    ]
+  );
+
+  await client.query(
+    `insert into inventory_transactions
+     (
+      product_id,
+      location_id,
+      transaction_type,
+      quantity,
+      reference_type,
+      remarks,
+      created_by
+     )
+     values ($1,$2,'stock_in',$3,'product_create','Initial stock from product creation',$4)`,
+    [
+      product.id,
+      locId,
+      Number(available_stock || 0) > 0 ? Number(available_stock || 0) : 1,
+      req.user.id
+    ]
+  );
+}
 
     await client.query(
       `insert into audit_logs

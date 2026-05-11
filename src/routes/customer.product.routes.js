@@ -1,20 +1,24 @@
-const express = require('express');
-const db = require('../config/db');
+const express = require("express");
+const db = require("../config/db");
 
 const router = express.Router();
 
-router.get('/', async (req, res) => {
+/**
+ * GET customer products
+ * Example:
+ * /api/customer/products?portal_type=household&location_id=UUID
+ * /api/customer/products?portal_type=commercial&location_id=UUID
+ */
+router.get("/products", async (req, res) => {
   try {
-   const {
-  location_id,
-  category_slug,
-  search,
-  featured,
-  portal_type
-} = req.query;
-
-    const limit = Math.min(Number(req.query.limit) || 20, 100);
-    const offset = Number(req.query.offset) || 0;
+    const {
+      location_id,
+      portal_type,
+      category_slug,
+      search,
+      limit = 20,
+      offset = 0,
+    } = req.query;
 
     const conditions = [];
     const params = [];
@@ -23,10 +27,11 @@ router.get('/', async (req, res) => {
       params.push(location_id);
       conditions.push(`location_id = $${params.length}`);
     }
+
     if (portal_type) {
-  params.push(portal_type);
-  conditions.push(`(portal_type = $${params.length} or portal_type = 'both')`);
-}
+      params.push(portal_type);
+      conditions.push(`(portal_type = $${params.length} or portal_type = 'both')`);
+    }
 
     if (category_slug) {
       params.push(category_slug);
@@ -35,98 +40,208 @@ router.get('/', async (req, res) => {
 
     if (search) {
       params.push(`%${search}%`);
-      conditions.push(`(name ilike $${params.length} or brand ilike $${params.length} or description ilike $${params.length})`);
+      conditions.push(`
+        (
+          name ilike $${params.length}
+          or brand ilike $${params.length}
+          or short_description ilike $${params.length}
+        )
+      `);
     }
 
-    if (featured === 'true') {
-      conditions.push(`is_featured = true`);
-    }
-
-    params.push(limit);
+    params.push(Number(limit));
     const limitParam = `$${params.length}`;
 
-    params.push(offset);
+    params.push(Number(offset));
     const offsetParam = `$${params.length}`;
 
-    const whereClause = conditions.length ? `where ${conditions.join(' and ')}` : '';
+    const whereClause = conditions.length
+      ? `where ${conditions.join(" and ")}`
+      : "";
 
-    const sql = `
-      select *
+    const result = await db.query(
+      `
+      select
+        id,
+        name,
+        slug,
+        short_description,
+        description,
+        brand,
+        unit,
+        weight,
+        quantity_value,
+        quantity_unit,
+        portal_type,
+        is_featured,
+        category_id,
+        category_name,
+        category_slug,
+        mrp,
+        selling_price,
+        currency,
+        available_stock,
+        location_id,
+        primary_image
       from customer_product_listing
       ${whereClause}
       order by is_featured desc, name asc
       limit ${limitParam} offset ${offsetParam}
-    `;
-
-    const result = await db.query(sql, params);
-
-    res.json({ success: true, data: result.rows });
-  } catch (error) {
-    console.error('Customer product listing error:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch products' });
-  }
-});
-
-router.get('/categories', async (req, res) => {
-  try {
-    const result = await db.query(
-      `select id, name, slug, image_url, description
-       from categories
-       where is_active = true
-       order by display_order asc, name asc`,
-      []
-    );
-
-    res.json({ success: true, data: result.rows });
-  } catch (error) {
-    console.error('Customer categories error:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch categories' });
-  }
-});
-
-router.get('/:slug', async (req, res) => {
-  try {
-    const { location_id } = req.query;
-
-    const params = [req.params.slug];
-    let locationCondition = '';
-
-    if (location_id) {
-      params.push(location_id);
-      locationCondition = `and location_id = $2`;
-    }
-
-    const productResult = await db.query(
-      `select *
-       from customer_product_listing
-       where slug = $1
-       ${locationCondition}
-       limit 1`,
+      `,
       params
     );
 
-    if (productResult.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Product not found or not available' });
+    res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Customer products error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch products",
+    });
+  }
+});
+
+/**
+ * GET single product by slug
+ * Example:
+ * /api/customer/products/floor-cleaner-500ml?location_id=UUID
+ */
+router.get("/products/:slug", async (req, res) => {
+  try {
+    const { location_id, portal_type } = req.query;
+
+    const params = [req.params.slug];
+    const conditions = [`slug = $1`];
+
+    if (location_id) {
+      params.push(location_id);
+      conditions.push(`location_id = $${params.length}`);
     }
 
+    if (portal_type) {
+      params.push(portal_type);
+      conditions.push(`(portal_type = $${params.length} or portal_type = 'both')`);
+    }
+
+    const result = await db.query(
+      `
+      select *
+      from customer_product_listing
+      where ${conditions.join(" and ")}
+      limit 1
+      `,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found or not available",
+      });
+    }
+
+    const product = result.rows[0];
+
     const imagesResult = await db.query(
-      `select image_url, alt_text, is_primary, display_order
-       from product_images
-       where product_id = $1
-       order by display_order asc`,
-      [productResult.rows[0].id]
+      `
+      select
+        image_url,
+        alt_text,
+        is_primary,
+        display_order
+      from product_images
+      where product_id = $1
+      order by display_order asc
+      `,
+      [product.id]
     );
 
     res.json({
       success: true,
       data: {
-        ...productResult.rows[0],
-        images: imagesResult.rows
-      }
+        ...product,
+        images: imagesResult.rows,
+      },
     });
   } catch (error) {
-    console.error('Customer product detail error:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch product details' });
+    console.error("Customer product detail error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch product details",
+    });
+  }
+});
+
+/**
+ * GET active categories
+ */
+router.get("/categories", async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      select
+        id,
+        name,
+        slug,
+        description,
+        image_url,
+        display_order
+      from categories
+      where is_active = true
+      order by display_order asc, name asc
+      `,
+      []
+    );
+
+    res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Customer categories error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch categories",
+    });
+  }
+});
+
+/**
+ * GET active service locations
+ */
+router.get("/locations", async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      select
+        id,
+        name,
+        city,
+        state,
+        pincode,
+        latitude,
+        longitude,
+        radius_km
+      from service_locations
+      where is_active = true
+      order by name asc
+      `,
+      []
+    );
+
+    res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Customer locations error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch locations",
+    });
   }
 });
 
