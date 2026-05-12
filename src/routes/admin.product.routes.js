@@ -15,117 +15,112 @@ router.use(authenticate, authorize('admin', 'operator'));
  * 3. product_prices
  * 4. inventory
  */
-router.post('/', async (req, res) => {
+router.post("/", async (req, res) => {
   const client = await db.pool.connect();
 
   try {
-   const {
-  category_id,
-  name,
-  slug,
-  sku,
-  short_description,
-  description,
-  brand,
-  unit,
-  weight,
-  quantity_value,
-  quantity_unit,
-  portal_type,
-  is_featured,
-  images,
-  location_id,
-location_ids,
-  mrp,
-  selling_price,
-  currency,
-  available_stock,
-  min_stock_level
-} = req.body;
+    const {
+      category_id,
+      name,
+      slug,
+      sku,
+      short_description,
+      description,
+      brand,
+      unit,
+      weight,
+      quantity_value,
+      quantity_unit,
+      portal_type,
+      is_featured,
+      images,
+      location_inventory,
+      currency
+    } = req.body;
 
-   const finalLocationIds =
-  Array.isArray(location_ids) && location_ids.length > 0
-    ? location_ids
-    : location_id
-      ? [location_id]
-      : [];
+    if (!category_id || !name) {
+      return res.status(400).json({
+        success: false,
+        message: "category_id and name are required"
+      });
+    }
 
-if (!category_id || !name || finalLocationIds.length === 0 || mrp === undefined || selling_price === undefined) {
-  return res.status(400).json({
-    success: false,
-    message: 'category_id, name, location_ids, mrp and selling_price are required'
-  });
-}
+    if (!Array.isArray(location_inventory) || location_inventory.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "location_inventory is required"
+      });
+    }
 
-    const finalPortalType = portal_type || 'household';
+    const finalPortalType = portal_type || "household";
 
-if (!['household', 'commercial', 'both'].includes(finalPortalType)) {
-  return res.status(400).json({
-    success: false,
-    message: 'Invalid portal_type'
-  });
-}
+    if (!["household", "commercial", "both"].includes(finalPortalType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid portal_type"
+      });
+    }
 
-if (finalPortalType === 'household' && !['ml', 'litre'].includes(quantity_unit)) {
-  return res.status(400).json({
-    success: false,
-    message: 'Household products must use ml or litre'
-  });
-}
+    if (finalPortalType === "household" && !["ml", "litre"].includes(quantity_unit)) {
+      return res.status(400).json({
+        success: false,
+        message: "Household products must use ml or litre"
+      });
+    }
 
-if (finalPortalType === 'commercial' && quantity_unit !== 'gallon') {
-  return res.status(400).json({
-    success: false,
-    message: 'Commercial products must use gallon'
-  });
-}
+    if (finalPortalType === "commercial" && quantity_unit !== "gallon") {
+      return res.status(400).json({
+        success: false,
+        message: "Commercial products must use gallon"
+      });
+    }
 
-if (finalPortalType === 'both' && !['ml', 'litre', 'gallon'].includes(quantity_unit)) {
-  return res.status(400).json({
-    success: false,
-    message: 'Invalid quantity unit'
-  });
-}
+    if (finalPortalType === "both" && !["ml", "litre", "gallon"].includes(quantity_unit)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quantity unit"
+      });
+    }
 
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
- const productResult = await client.query(
-  `insert into products
-   (
-    category_id,
-    name,
-    slug,
-    sku,
-    short_description,
-    description,
-    brand,
-    unit,
-    weight,
-    quantity_value,
-    quantity_unit,
-    portal_type,
-    is_featured,
-    created_by
-   )
-   values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-   returning *`,
-  [
-    category_id,
-    name,
-    slug || createSlug(name),
-    sku || null,
-    short_description || null,
-    description || null,
-    brand || null,
-    unit || null,
-    weight || null,
-    quantity_value || null,
-    quantity_unit || null,
-    finalPortalType,
-    Boolean(is_featured),
-    req.user.id
-  ]
-);
+    const productResult = await client.query(
+      `insert into products
+       (
+        category_id,
+        name,
+        slug,
+        sku,
+        short_description,
+        description,
+        brand,
+        unit,
+        weight,
+        quantity_value,
+        quantity_unit,
+        portal_type,
+        is_featured,
+        created_by
+       )
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       returning *`,
+      [
+        category_id,
+        name,
+        slug || createSlug(name),
+        sku || null,
+        short_description || null,
+        description || null,
+        brand || null,
+        unit || null,
+        weight || null,
+        quantity_value || null,
+        quantity_unit || null,
+        finalPortalType,
+        Boolean(is_featured),
+        req.user.id
+      ]
+    );
 
     const product = productResult.rows[0];
 
@@ -133,101 +128,130 @@ if (finalPortalType === 'both' && !['ml', 'litre', 'gallon'].includes(quantity_u
       for (let index = 0; index < images.length; index++) {
         const img = images[index];
 
-       if (Array.isArray(images) && images.length > 0) {
-  for (let index = 0; index < images.length; index++) {
-    const img = images[index];
-
-    await client.query(
-      `insert into product_images
-       (
-        product_id,
-        image_url,
-        storage_bucket,
-        storage_path,
-        file_name,
-        mime_type,
-        file_size,
-        alt_text,
-        is_primary,
-        display_order
-       )
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [
-        product.id,
-        img.image_url,
-        img.storage_bucket || 'product-images',
-        img.storage_path || null,
-        img.file_name || null,
-        img.mime_type || null,
-        img.file_size || null,
-        img.alt_text || null,
-        index === 0 ? true : Boolean(img.is_primary),
-        img.display_order || index
-      ]
-    );
-  }
-}
+        await client.query(
+          `insert into product_images
+           (
+            product_id,
+            image_url,
+            storage_bucket,
+            storage_path,
+            file_name,
+            mime_type,
+            file_size,
+            alt_text,
+            is_primary,
+            display_order
+           )
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [
+            product.id,
+            img.image_url,
+            img.storage_bucket || "product-images",
+            img.storage_path || null,
+            img.file_name || null,
+            img.mime_type || null,
+            img.file_size || null,
+            img.alt_text || null,
+            index === 0 ? true : Boolean(img.is_primary),
+            img.display_order || index
+          ]
+        );
       }
     }
 
-   for (const locId of finalLocationIds) {
-  await client.query(
-    `insert into product_prices
-     (product_id, location_id, mrp, selling_price, currency, is_active)
-     values ($1,$2,$3,$4,$5,true)`,
-    [product.id, locId, mrp, selling_price, currency || 'INR']
-  );
-}
+    for (const loc of location_inventory) {
+      if (!loc.location_id) {
+        throw new Error("location_id is required for each location inventory");
+      }
 
-  for (const locId of finalLocationIds) {
-  await client.query(
-    `insert into inventory
-     (
-      product_id,
-      location_id,
-      available_stock,
-      reserved_stock,
-      min_stock_level,
-      is_out_of_stock,
-      is_active
-     )
-     values ($1,$2,$3,0,$4,$5,true)
-     on conflict (product_id, location_id)
-     do update set
-       available_stock = excluded.available_stock,
-       min_stock_level = excluded.min_stock_level,
-       is_out_of_stock = excluded.is_out_of_stock,
-       is_active = true,
-       updated_at = now()`,
-    [
-      product.id,
-      locId,
-      available_stock || 0,
-      min_stock_level || 0,
-      Number(available_stock || 0) <= 0
-    ]
-  );
+      if (loc.mrp === undefined || loc.selling_price === undefined) {
+        throw new Error("mrp and selling_price are required for each location");
+      }
 
-  await client.query(
-    `insert into inventory_transactions
-     (
-      product_id,
-      location_id,
-      transaction_type,
-      quantity,
-      reference_type,
-      remarks,
-      created_by
-     )
-     values ($1,$2,'stock_in',$3,'product_create','Initial stock from product creation',$4)`,
-    [
-      product.id,
-      locId,
-      Number(available_stock || 0) > 0 ? Number(available_stock || 0) : 1,
-      req.user.id
-    ]
-  );
-}
+      const locAvailableStock = Number(loc.available_stock || 0);
+      const locReservedStock = Number(loc.reserved_stock || 0);
+      const locMinStock = Number(loc.min_stock_level || 0);
+
+      if (locAvailableStock < 0 || locReservedStock < 0 || locMinStock < 0) {
+        throw new Error("Inventory values cannot be negative");
+      }
+
+      await client.query(
+        `insert into product_prices
+         (
+          product_id,
+          location_id,
+          mrp,
+          selling_price,
+          currency,
+          is_active
+         )
+         values ($1,$2,$3,$4,$5,true)`,
+        [
+          product.id,
+          loc.location_id,
+          Number(loc.mrp),
+          Number(loc.selling_price),
+          currency || "INR"
+        ]
+      );
+
+ await client.query(
+  `insert into location_inventory
+   (
+    product_id,
+    location_id,
+    available_stock,
+    reserved_stock,
+    min_stock_level,
+    is_out_of_stock,
+    is_active,
+    updated_at
+   )
+   values ($1,$2,$3,$4,$5,$6,true,now())
+   on conflict (product_id, location_id)
+   do update set
+     available_stock = excluded.available_stock,
+     reserved_stock = excluded.reserved_stock,
+     min_stock_level = excluded.min_stock_level,
+     is_out_of_stock = excluded.is_out_of_stock,
+     is_active = true,
+     updated_at = now()`,
+  [
+    product.id,
+    loc.location_id,
+    locAvailableStock,
+    locReservedStock,
+    locMinStock,
+    locAvailableStock <= 0
+  ]
+);
+
+      if (locAvailableStock > 0) {
+        await client.query(
+          `insert into inventory_transactions
+           (
+            product_id,
+            location_id,
+            transaction_type,
+            quantity,
+            reference_type,
+            remarks,
+            created_by
+           )
+           values ($1,$2,'stock_in',$3,'product_create',$4,$5)`,
+          [
+            product.id,
+            loc.location_id,
+            locAvailableStock,
+            "Initial stock added during product creation",
+            req.user.id
+          ]
+        );
+      }
+    }
+
+    await client.query(`select sync_main_inventory($1)`, [product.id]);
 
     await client.query(
       `insert into audit_logs
@@ -236,22 +260,25 @@ if (finalPortalType === 'both' && !['ml', 'litre', 'gallon'].includes(quantity_u
       [req.user.id, product.id, product]
     );
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     res.status(201).json({
       success: true,
-      message: 'Product created successfully',
+      message: "Product created successfully",
       data: product
     });
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Create product error:', error);
-    res.status(500).json({ success: false, message: 'Failed to create product' });
+    await client.query("ROLLBACK");
+    console.error("Create product error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to create product"
+    });
   } finally {
     client.release();
   }
 });
-
 router.get('/', async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 20, 100);
@@ -440,24 +467,36 @@ router.put('/:id/inventory', async (req, res) => {
     }
 
     const result = await db.query(
-      `insert into inventory
-       (product_id, location_id, available_stock, reserved_stock, min_stock_level, is_out_of_stock)
-       values ($1,$2,$3,0,$4,$5)
-       on conflict (product_id, location_id)
-       do update set
-         available_stock = excluded.available_stock,
-         min_stock_level = excluded.min_stock_level,
-         is_out_of_stock = excluded.is_out_of_stock,
-         updated_at = now()
-       returning *`,
-      [
-        req.params.id,
-        location_id,
-        available_stock,
-        min_stock_level || 0,
-        Number(available_stock) <= 0
-      ]
-    );
+  `insert into location_inventory
+   (
+    product_id,
+    location_id,
+    available_stock,
+    reserved_stock,
+    min_stock_level,
+    is_out_of_stock,
+    is_active,
+    updated_at
+   )
+   values ($1,$2,$3,0,$4,$5,true,now())
+   on conflict (product_id, location_id)
+   do update set
+     available_stock = excluded.available_stock,
+     min_stock_level = excluded.min_stock_level,
+     is_out_of_stock = excluded.is_out_of_stock,
+     is_active = true,
+     updated_at = now()
+   returning *`,
+  [
+    req.params.id,
+    location_id,
+    available_stock,
+    min_stock_level || 0,
+    Number(available_stock) <= 0
+  ]
+);
+
+await db.query(`select sync_main_inventory($1)`, [req.params.id]);
 
     await db.query(
       `insert into inventory_transactions
