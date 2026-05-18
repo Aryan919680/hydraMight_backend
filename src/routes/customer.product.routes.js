@@ -26,13 +26,14 @@ router.get("/locations", async (req, res) => {
 
     res.json({
       success: true,
-      data: result.rows
+      data: result.rows,
     });
   } catch (error) {
     console.error("Customer locations error:", error);
+
     res.status(500).json({
       success: false,
-      message: "Failed to fetch locations"
+      message: "Failed to fetch locations",
     });
   }
 });
@@ -58,13 +59,14 @@ router.get("/categories", async (req, res) => {
 
     res.json({
       success: true,
-      data: result.rows
+      data: result.rows,
     });
   } catch (error) {
     console.error("Customer categories error:", error);
+
     res.status(500).json({
       success: false,
-      message: "Failed to fetch categories"
+      message: "Failed to fetch categories",
     });
   }
 });
@@ -72,33 +74,50 @@ router.get("/categories", async (req, res) => {
 /**
  * GET customer products.
  *
- * Example:
+ * New flow:
+ * /api/customer/products?service_location_id=uuid&ecom_channel=household
+ * /api/customer/products?service_location_id=uuid&ecom_channel=commercial
+ *
+ * Backward compatible:
  * /api/customer/products?location_id=uuid&portal_type=household
- * /api/customer/products?location_id=uuid&portal_type=commercial
  */
 router.get("/products", async (req, res) => {
   try {
     const {
+      service_location_id,
       location_id,
+
+      ecom_channel,
       portal_type,
+
       category_slug,
       search,
       featured,
       limit = 20,
-      offset = 0
+      offset = 0,
     } = req.query;
+
+    const finalLocationId = service_location_id || location_id;
+    const finalEcomChannel = ecom_channel || portal_type;
 
     const conditions = [];
     const params = [];
 
-    if (location_id) {
-      params.push(location_id);
-      conditions.push(`location_id = $${params.length}`);
+    if (finalLocationId) {
+      params.push(finalLocationId);
+      conditions.push(`service_location_id = $${params.length}`);
     }
 
-    if (portal_type) {
-      params.push(portal_type);
-      conditions.push(`(portal_type = $${params.length} or portal_type = 'both')`);
+    if (finalEcomChannel) {
+      if (!["household", "commercial"].includes(finalEcomChannel)) {
+        return res.status(400).json({
+          success: false,
+          message: "ecom_channel must be household or commercial",
+        });
+      }
+
+      params.push(finalEcomChannel);
+      conditions.push(`ecom_channel = $${params.length}`);
     }
 
     if (category_slug) {
@@ -137,31 +156,38 @@ router.get("/products", async (req, res) => {
         id,
         name,
         slug,
+        sku,
         short_description,
         description,
         brand,
-        unit,
-        weight,
+
+        ecom_channel,
         quantity_value,
         quantity_unit,
-        portal_type,
+        unit,
+        weight,
+
+        mrp,
+        selling_price,
+        currency,
+
         is_featured,
 
         category_id,
         category_name,
         category_slug,
 
-        mrp,
-        selling_price,
-        currency,
+        service_location_id,
+        service_location_name,
+        service_location_city,
+        service_location_state,
+        service_location_pincode,
 
-        available_stock,
+        allocated_stock,
         reserved_stock,
-        location_id,
-        location_name,
-        location_city,
-        location_state,
-        location_pincode,
+        available_stock,
+        is_out_of_stock,
+        is_low_stock,
 
         primary_image
 
@@ -176,35 +202,58 @@ router.get("/products", async (req, res) => {
 
     res.json({
       success: true,
-      data: result.rows
+      data: result.rows,
     });
   } catch (error) {
     console.error("Customer products error:", error);
+
     res.status(500).json({
       success: false,
-      message: "Failed to fetch products"
+      message: error.message || "Failed to fetch products",
     });
   }
 });
 
 /**
  * GET product detail by slug.
+ *
+ * New flow:
+ * /api/customer/products/:slug?service_location_id=uuid&ecom_channel=household
+ *
+ * Backward compatible:
+ * /api/customer/products/:slug?location_id=uuid&portal_type=household
  */
 router.get("/products/:slug", async (req, res) => {
   try {
-    const { location_id, portal_type } = req.query;
+    const {
+      service_location_id,
+      location_id,
+
+      ecom_channel,
+      portal_type,
+    } = req.query;
+
+    const finalLocationId = service_location_id || location_id;
+    const finalEcomChannel = ecom_channel || portal_type;
 
     const params = [req.params.slug];
     const conditions = [`slug = $1`];
 
-    if (location_id) {
-      params.push(location_id);
-      conditions.push(`location_id = $${params.length}`);
+    if (finalLocationId) {
+      params.push(finalLocationId);
+      conditions.push(`service_location_id = $${params.length}`);
     }
 
-    if (portal_type) {
-      params.push(portal_type);
-      conditions.push(`(portal_type = $${params.length} or portal_type = 'both')`);
+    if (finalEcomChannel) {
+      if (!["household", "commercial"].includes(finalEcomChannel)) {
+        return res.status(400).json({
+          success: false,
+          message: "ecom_channel must be household or commercial",
+        });
+      }
+
+      params.push(finalEcomChannel);
+      conditions.push(`ecom_channel = $${params.length}`);
     }
 
     const productResult = await db.query(
@@ -218,7 +267,7 @@ router.get("/products/:slug", async (req, res) => {
     if (productResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Product not found or not available"
+        message: "Product not found or not available for selected location",
       });
     }
 
@@ -232,7 +281,8 @@ router.get("/products/:slug", async (req, res) => {
         display_order
        from product_images
        where product_id = $1
-       order by display_order asc`,
+       and coalesce(is_active, true) = true
+       order by is_primary desc, display_order asc, created_at asc`,
       [product.id]
     );
 
@@ -240,14 +290,15 @@ router.get("/products/:slug", async (req, res) => {
       success: true,
       data: {
         ...product,
-        images: imagesResult.rows
-      }
+        images: imagesResult.rows,
+      },
     });
   } catch (error) {
     console.error("Customer product detail error:", error);
+
     res.status(500).json({
       success: false,
-      message: "Failed to fetch product details"
+      message: error.message || "Failed to fetch product details",
     });
   }
 });
