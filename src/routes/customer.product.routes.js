@@ -105,7 +105,7 @@ router.get("/products", async (req, res) => {
 
     if (finalLocationId) {
       params.push(finalLocationId);
-      conditions.push(`service_location_id = $${params.length}`);
+      conditions.push(`cpl.service_location_id = $${params.length}`);
     }
 
     if (finalEcomChannel) {
@@ -117,26 +117,26 @@ router.get("/products", async (req, res) => {
       }
 
       params.push(finalEcomChannel);
-      conditions.push(`ecom_channel = $${params.length}`);
+      conditions.push(`cpl.ecom_channel = $${params.length}`);
     }
 
     if (category_slug) {
       params.push(category_slug);
-      conditions.push(`category_slug = $${params.length}`);
+      conditions.push(`cpl.category_slug = $${params.length}`);
     }
 
     if (featured === "true") {
-      conditions.push(`is_featured = true`);
+      conditions.push(`cpl.is_featured = true`);
     }
 
     if (search) {
       params.push(`%${search}%`);
       conditions.push(`
         (
-          name ilike $${params.length}
-          or brand ilike $${params.length}
-          or short_description ilike $${params.length}
-          or description ilike $${params.length}
+          cpl.name ilike $${params.length}
+          or cpl.brand ilike $${params.length}
+          or cpl.short_description ilike $${params.length}
+          or cpl.description ilike $${params.length}
         )
       `);
     }
@@ -153,49 +153,74 @@ router.get("/products", async (req, res) => {
 
     const result = await db.query(
       `select
-        id,
-        name,
-        slug,
-        sku,
-        short_description,
-        description,
-        brand,
+        cpl.id,
+        cpl.name,
+        cpl.slug,
+        cpl.sku,
 
-        ecom_channel,
-        quantity_value,
-        quantity_unit,
-        unit,
-        weight,
+        cpl.short_description,
+        cpl.description,
+        cpl.brand,
 
-        mrp,
-        selling_price,
-        currency,
+        cpl.ecom_channel,
+        cpl.quantity_value,
+        cpl.quantity_unit,
+        cpl.unit,
+        cpl.weight,
 
-        is_featured,
+        cpl.mrp,
+        cpl.selling_price,
+        cpl.currency,
 
-        category_id,
-        category_name,
-        category_slug,
+        cpl.is_featured,
 
-        service_location_id,
-        service_location_name,
-        service_location_city,
-        service_location_state,
-        service_location_pincode,
+        cpl.category_id,
+        cpl.category_name,
+        cpl.category_slug,
 
-        allocated_stock,
-        reserved_stock,
-        available_stock,
-        is_out_of_stock,
-        is_low_stock,
+        cpl.service_location_id,
+        cpl.service_location_name,
+        cpl.service_location_city,
+        cpl.service_location_state,
+        cpl.service_location_pincode,
 
-        primary_image
+        cpl.allocated_stock,
+        cpl.reserved_stock,
+        cpl.available_stock,
+        cpl.is_out_of_stock,
+        cpl.is_low_stock,
 
-       from customer_product_listing
+        cpl.primary_image,
+
+        coalesce(
+          (
+            select json_agg(
+              json_build_object(
+                'id', pi.id,
+                'image_url', pi.image_url,
+                'storage_bucket', pi.storage_bucket,
+                'storage_path', pi.storage_path,
+                'file_name', pi.file_name,
+                'mime_type', pi.mime_type,
+                'file_size', pi.file_size,
+                'alt_text', pi.alt_text,
+                'is_primary', pi.is_primary,
+                'display_order', pi.display_order
+              )
+              order by pi.is_primary desc, pi.display_order asc, pi.created_at asc
+            )
+            from product_images pi
+            where pi.product_id = cpl.id
+            and coalesce(pi.is_active, true) = true
+          ),
+          '[]'::json
+        ) as images
+
+       from customer_product_listing cpl
 
        ${whereClause}
 
-       order by is_featured desc, name asc
+       order by cpl.is_featured desc, cpl.name asc
        limit ${limitParam} offset ${offsetParam}`,
       params
     );
@@ -273,18 +298,24 @@ router.get("/products/:slug", async (req, res) => {
 
     const product = productResult.rows[0];
 
-    const imagesResult = await db.query(
-      `select
-        image_url,
-        alt_text,
-        is_primary,
-        display_order
-       from product_images
-       where product_id = $1
-       and coalesce(is_active, true) = true
-       order by is_primary desc, display_order asc, created_at asc`,
-      [product.id]
-    );
+   const imagesResult = await db.query(
+  `select
+    id,
+    image_url,
+    storage_bucket,
+    storage_path,
+    file_name,
+    mime_type,
+    file_size,
+    alt_text,
+    is_primary,
+    display_order
+   from product_images
+   where product_id = $1
+   and coalesce(is_active, true) = true
+   order by is_primary desc, display_order asc, created_at asc`,
+  [product.id]
+);
 
     res.json({
       success: true,
