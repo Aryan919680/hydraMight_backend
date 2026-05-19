@@ -385,21 +385,22 @@ router.get("/products/:slug/recommendations", async (req, res) => {
      * First find selected product in same customer-available listing.
      * This ensures selected product is valid for this location/channel.
      */
-    const selectedProductResult = await db.query(
-      `select
-        id,
-        slug,
-        category_id,
-        category_slug,
-        ecom_channel,
-        service_location_id
-       from customer_product_listing
-       where slug = $1
-       and service_location_id = $2
-       and ecom_channel = $3
-       limit 1`,
-      [req.params.slug, finalLocationId, finalEcomChannel]
-    );
+const selectedProductResult = await db.query(
+  `select distinct on (id)
+    id,
+    slug,
+    category_id,
+    category_slug,
+    ecom_channel,
+    service_location_id
+   from customer_product_listing
+   where slug = $1
+   and service_location_id = $2
+   and ecom_channel = $3
+   order by id, available_stock desc
+   limit 1`,
+  [req.params.slug, finalLocationId, finalEcomChannel]
+);
 
     if (selectedProductResult.rows.length === 0) {
       return res.status(404).json({
@@ -412,95 +413,107 @@ router.get("/products/:slug/recommendations", async (req, res) => {
 
     const maxLimit = Math.min(Number(limit) || 8, 20);
 
-    const result = await db.query(
-      `select
-        cpl.id,
-        cpl.name,
-        cpl.slug,
-        cpl.sku,
+const result = await db.query(
+  `with unique_recommendations as (
+    select distinct on (cpl.id)
+      cpl.id,
+      cpl.name,
+      cpl.slug,
+      cpl.sku,
 
-        cpl.short_description,
-        cpl.description,
-        cpl.brand,
+      cpl.short_description,
+      cpl.description,
+      cpl.brand,
 
-        cpl.ecom_channel,
-        cpl.quantity_value,
-        cpl.quantity_unit,
-        cpl.unit,
-        cpl.weight,
+      cpl.ecom_channel,
+      cpl.quantity_value,
+      cpl.quantity_unit,
+      cpl.unit,
+      cpl.weight,
 
-        cpl.mrp,
-        cpl.selling_price,
-        cpl.currency,
+      cpl.mrp,
+      cpl.selling_price,
+      cpl.currency,
 
-        cpl.is_featured,
+      cpl.is_featured,
 
-        cpl.category_id,
-        cpl.category_name,
-        cpl.category_slug,
+      cpl.category_id,
+      cpl.category_name,
+      cpl.category_slug,
 
-        cpl.service_location_id,
-        cpl.service_location_name,
-        cpl.service_location_city,
-        cpl.service_location_state,
-        cpl.service_location_pincode,
+      cpl.service_location_id,
+      cpl.service_location_name,
+      cpl.service_location_city,
+      cpl.service_location_state,
+      cpl.service_location_pincode,
 
-        cpl.allocated_stock,
-        cpl.reserved_stock,
-        cpl.available_stock,
-        cpl.is_out_of_stock,
-        cpl.is_low_stock,
+      cpl.allocated_stock,
+      cpl.reserved_stock,
+      cpl.available_stock,
+      cpl.is_out_of_stock,
+      cpl.is_low_stock,
 
-        cpl.primary_image,
+      cpl.primary_image
 
-        coalesce(
-          (
-            select json_agg(
-              json_build_object(
-                'id', pi.id,
-                'image_url', pi.image_url,
-                'storage_bucket', pi.storage_bucket,
-                'storage_path', pi.storage_path,
-                'file_name', pi.file_name,
-                'mime_type', pi.mime_type,
-                'file_size', pi.file_size,
-                'alt_text', pi.alt_text,
-                'is_primary', pi.is_primary,
-                'display_order', pi.display_order
-              )
-              order by pi.is_primary desc, pi.display_order asc, pi.created_at asc
-            )
-            from product_images pi
-            where pi.product_id = cpl.id
-            and coalesce(pi.is_active, true) = true
-          ),
-          '[]'::json
-        ) as images
+    from customer_product_listing cpl
 
-       from customer_product_listing cpl
+    where cpl.category_id = $1
+    and cpl.id <> $2
+    and cpl.service_location_id = $3
+    and cpl.ecom_channel = $4
+    and cpl.available_stock > 0
+    and cpl.is_out_of_stock = false
 
-       where cpl.category_id = $1
-       and cpl.id <> $2
-       and cpl.service_location_id = $3
-       and cpl.ecom_channel = $4
-       and cpl.available_stock > 0
-       and cpl.is_out_of_stock = false
+    order by
+      cpl.id,
+      cpl.available_stock desc,
+      cpl.is_featured desc,
+      cpl.name asc
+  )
 
-       order by
-        cpl.is_featured desc,
-        cpl.available_stock desc,
-        cpl.name asc
+  select
+    ur.*,
 
-       limit $5`,
-      [
-        selectedProduct.category_id,
-        selectedProduct.id,
-        finalLocationId,
-        finalEcomChannel,
-        maxLimit,
-      ]
-    );
+    coalesce(
+      (
+        select json_agg(
+          json_build_object(
+            'id', pi.id,
+            'image_url', pi.image_url,
+            'storage_bucket', pi.storage_bucket,
+            'storage_path', pi.storage_path,
+            'file_name', pi.file_name,
+            'mime_type', pi.mime_type,
+            'file_size', pi.file_size,
+            'alt_text', pi.alt_text,
+            'is_primary', pi.is_primary,
+            'display_order', pi.display_order
+          )
+          order by pi.is_primary desc, pi.display_order asc, pi.created_at asc
+        )
+        from product_images pi
+        where pi.product_id = ur.id
+        and coalesce(pi.is_active, true) = true
+      ),
+      '[]'::json
+    ) as images
 
+  from unique_recommendations ur
+
+  order by
+    ur.is_featured desc,
+    ur.available_stock desc,
+    ur.name asc
+
+  limit $5`,
+  [
+    selectedProduct.category_id,
+    selectedProduct.id,
+    finalLocationId,
+    finalEcomChannel,
+    maxLimit,
+  ]
+);
     res.json({
       success: true,
       selected_product: {
