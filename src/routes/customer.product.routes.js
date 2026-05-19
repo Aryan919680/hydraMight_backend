@@ -349,6 +349,101 @@ router.get("/products/:slug", async (req, res) => {
 
 
 /**
+ * GET product detail by id.
+ *
+ * Example:
+ * /api/customer/products/id/PRODUCT_UUID?service_location_id=uuid&ecom_channel=household
+ */
+router.get("/products/id/:id", async (req, res) => {
+  try {
+    const {
+      service_location_id,
+      location_id,
+
+      ecom_channel,
+      portal_type,
+    } = req.query;
+
+    const finalLocationId = service_location_id || location_id;
+    const finalEcomChannel = ecom_channel || portal_type;
+
+    const params = [req.params.id];
+    const conditions = [`id = $1`];
+
+    if (finalLocationId) {
+      params.push(finalLocationId);
+      conditions.push(`service_location_id = $${params.length}`);
+    }
+
+    if (finalEcomChannel) {
+      if (!["household", "commercial"].includes(finalEcomChannel)) {
+        return res.status(400).json({
+          success: false,
+          message: "ecom_channel must be household or commercial",
+        });
+      }
+
+      params.push(finalEcomChannel);
+      conditions.push(`ecom_channel = $${params.length}`);
+    }
+
+    const productResult = await db.query(
+      `select distinct on (id)
+        *
+       from customer_product_listing
+       where ${conditions.join(" and ")}
+       order by id, available_stock desc
+       limit 1`,
+      params
+    );
+
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found or not available for selected location",
+      });
+    }
+
+    const product = productResult.rows[0];
+
+    const imagesResult = await db.query(
+      `select
+        id,
+        image_url,
+        storage_bucket,
+        storage_path,
+        file_name,
+        mime_type,
+        file_size,
+        alt_text,
+        is_primary,
+        display_order
+       from product_images
+       where product_id = $1
+       and coalesce(is_active, true) = true
+       order by is_primary desc, display_order asc, created_at asc`,
+      [product.id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        ...product,
+        images: imagesResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Customer product detail by id error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch product details",
+    });
+  }
+});
+
+
+/**
  * GET product recommendations from same category.
  *
  * Example:
