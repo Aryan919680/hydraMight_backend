@@ -252,100 +252,6 @@ const result = await db.query(
   }
 });
 
-/**
- * GET product detail by slug.
- *
- * New flow:
- * /api/customer/products/:slug?service_location_id=uuid&ecom_channel=household
- *
- * Backward compatible:
- * /api/customer/products/:slug?location_id=uuid&portal_type=household
- */
-router.get("/products/:slug", async (req, res) => {
-  try {
-    const {
-      service_location_id,
-      location_id,
-
-      ecom_channel,
-      portal_type,
-    } = req.query;
-
-    const finalLocationId = service_location_id || location_id;
-    const finalEcomChannel = ecom_channel || portal_type;
-
-    const params = [req.params.slug];
-    const conditions = [`slug = $1`];
-
-    if (finalLocationId) {
-      params.push(finalLocationId);
-      conditions.push(`service_location_id = $${params.length}`);
-    }
-
-    if (finalEcomChannel) {
-      if (!["household", "commercial"].includes(finalEcomChannel)) {
-        return res.status(400).json({
-          success: false,
-          message: "ecom_channel must be household or commercial",
-        });
-      }
-
-      params.push(finalEcomChannel);
-      conditions.push(`ecom_channel = $${params.length}`);
-    }
-
-    const productResult = await db.query(
-      `select *
-       from customer_product_listing
-       where ${conditions.join(" and ")}
-       limit 1`,
-      params
-    );
-
-    if (productResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found or not available for selected location",
-      });
-    }
-
-    const product = productResult.rows[0];
-
-   const imagesResult = await db.query(
-  `select
-    id,
-    image_url,
-    storage_bucket,
-    storage_path,
-    file_name,
-    mime_type,
-    file_size,
-    alt_text,
-    is_primary,
-    display_order
-   from product_images
-   where product_id = $1
-   and coalesce(is_active, true) = true
-   order by is_primary desc, display_order asc, created_at asc`,
-  [product.id]
-);
-
-    res.json({
-      success: true,
-      data: {
-        ...product,
-        images: imagesResult.rows,
-      },
-    });
-  } catch (error) {
-    console.error("Customer product detail error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to fetch product details",
-    });
-  }
-});
 
 /**
  * SEARCH customer products.
@@ -379,7 +285,7 @@ router.get("/products/search", async (req, res) => {
       limit = 20,
       offset = 0,
     } = req.query;
-
+  console.log("Search query:");
     const finalSearch = String(q || search || "").trim();
     const finalLocationId = service_location_id || location_id;
     const finalEcomChannel = ecom_channel || portal_type;
@@ -624,6 +530,197 @@ router.get("/products/search", async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to search products",
+    });
+  }
+});
+
+
+/**
+ * GET product search suggestions / autocomplete.
+ *
+ * Example:
+ * /api/customer/products/suggestions?q=f&service_location_id=uuid&ecom_channel=household
+ */
+router.get("/products/suggestions", async (req, res) => {
+  try {
+    const {
+      q,
+      search,
+
+      service_location_id,
+      location_id,
+
+      ecom_channel,
+      portal_type,
+
+      limit = 10,
+    } = req.query;
+
+    const finalSearch = String(q || search || "").trim();
+    const finalLocationId = service_location_id || location_id;
+    const finalEcomChannel = ecom_channel || portal_type;
+
+    if (!finalSearch) {
+      return res.json({
+        success: true,
+        query: "",
+        data: [],
+      });
+    }
+
+    if (!finalLocationId) {
+      return res.status(400).json({
+        success: false,
+        message: "service_location_id is required",
+      });
+    }
+
+    if (!finalEcomChannel || !["household", "commercial"].includes(finalEcomChannel)) {
+      return res.status(400).json({
+        success: false,
+        message: "ecom_channel must be household or commercial",
+      });
+    }
+
+    const safeLimit = Math.min(Number(limit) || 10, 15);
+
+    const productResult = await db.query(
+      `with matched_products as (
+        select distinct on (cpl.id)
+          'product' as type,
+
+          cpl.id,
+          cpl.name,
+          cpl.slug,
+          cpl.sku,
+
+          cpl.category_id,
+          cpl.category_name,
+          cpl.category_slug,
+
+          cpl.brand,
+          cpl.ecom_channel,
+
+          cpl.mrp,
+          cpl.selling_price,
+          cpl.currency,
+
+          cpl.primary_image,
+          cpl.available_stock,
+
+          case
+            when lower(cpl.name) = lower($1) then 100
+            when cpl.name ilike $2 then 90
+            when cpl.sku ilike $2 then 80
+            when cpl.category_name ilike $2 then 70
+            when cpl.brand ilike $2 then 60
+            when cpl.short_description ilike $2 then 50
+            when cpl.description ilike $2 then 40
+            else 0
+          end as relevance_score
+
+        from customer_product_listing cpl
+
+        where cpl.service_location_id = $3
+        and cpl.ecom_channel = $4
+        and cpl.available_stock > 0
+        and cpl.is_out_of_stock = false
+        and (
+          cpl.name ilike $2
+          or cpl.sku ilike $2
+          or cpl.category_name ilike $2
+          or cpl.brand ilike $2
+          or cpl.short_description ilike $2
+          or cpl.description ilike $2
+        )
+
+        order by
+          cpl.id,
+          cpl.available_stock desc,
+          cpl.is_featured desc
+      )
+
+      select *
+      from matched_products
+      order by
+        relevance_score desc,
+        name asc
+      limit $5`,
+      [
+        finalSearch,
+        `%${finalSearch}%`,
+        finalLocationId,
+        finalEcomChannel,
+        safeLimit,
+      ]
+    );
+
+    const categoryResult = await db.query(
+      `select distinct
+        'category' as type,
+        null::uuid as id,
+        cpl.category_name as name,
+        null::text as slug,
+        null::text as sku,
+
+        cpl.category_id,
+        cpl.category_name,
+        cpl.category_slug,
+
+        null::text as brand,
+        cpl.ecom_channel,
+
+        null::numeric as mrp,
+        null::numeric as selling_price,
+        null::text as currency,
+
+        null::text as primary_image,
+        null::int as available_stock,
+
+        case
+          when lower(cpl.category_name) = lower($1) then 100
+          when cpl.category_name ilike $2 then 85
+          else 0
+        end as relevance_score
+
+       from customer_product_listing cpl
+
+       where cpl.service_location_id = $3
+       and cpl.ecom_channel = $4
+       and cpl.available_stock > 0
+       and cpl.is_out_of_stock = false
+       and cpl.category_name ilike $2
+
+       order by relevance_score desc, cpl.category_name asc
+
+       limit 5`,
+      [
+        finalSearch,
+        `%${finalSearch}%`,
+        finalLocationId,
+        finalEcomChannel,
+      ]
+    );
+
+    const merged = [...productResult.rows, ...categoryResult.rows]
+      .sort((a, b) => {
+        const scoreDiff = Number(b.relevance_score || 0) - Number(a.relevance_score || 0);
+        if (scoreDiff !== 0) return scoreDiff;
+        return String(a.name || "").localeCompare(String(b.name || ""));
+      })
+      .slice(0, safeLimit);
+
+    res.json({
+      success: true,
+      query: finalSearch,
+      data: merged,
+    });
+  } catch (error) {
+    console.error("Customer product suggestions error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch product suggestions",
     });
   }
 });
@@ -910,5 +1007,107 @@ const result = await db.query(
     });
   }
 });
+
+/**
+ * GET product detail by slug.
+ *
+ * New flow:
+ * /api/customer/products/:slug?service_location_id=uuid&ecom_channel=household
+ *
+ * Backward compatible:
+ * /api/customer/products/:slug?location_id=uuid&portal_type=household
+ */
+router.get("/products/:slug", async (req, res) => {
+  try {
+    const {
+      service_location_id,
+      location_id,
+
+      ecom_channel,
+      portal_type,
+    } = req.query;
+
+    const finalLocationId = service_location_id || location_id;
+    const finalEcomChannel = ecom_channel || portal_type;
+
+    const params = [req.params.slug];
+    const conditions = [`slug = $1`];
+
+    if (finalLocationId) {
+      params.push(finalLocationId);
+      conditions.push(`service_location_id = $${params.length}`);
+    }
+
+    if (finalEcomChannel) {
+      if (!["household", "commercial"].includes(finalEcomChannel)) {
+        return res.status(400).json({
+          success: false,
+          message: "ecom_channel must be household or commercial",
+        });
+      }
+
+      params.push(finalEcomChannel);
+      conditions.push(`ecom_channel = $${params.length}`);
+    }
+
+    const productResult = await db.query(
+      `select *
+       from customer_product_listing
+       where ${conditions.join(" and ")}
+       limit 1`,
+      params
+    );
+
+    if (productResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found or not available for selected location",
+      });
+    }
+
+    const product = productResult.rows[0];
+
+   const imagesResult = await db.query(
+  `select
+    id,
+    image_url,
+    storage_bucket,
+    storage_path,
+    file_name,
+    mime_type,
+    file_size,
+    alt_text,
+    is_primary,
+    display_order
+   from product_images
+   where product_id = $1
+   and coalesce(is_active, true) = true
+   order by is_primary desc, display_order asc, created_at asc`,
+  [product.id]
+);
+
+    res.json({
+      success: true,
+      data: {
+        ...product,
+        images: imagesResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Customer product detail error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch product details",
+    });
+  }
+});
+
+
+
+
+
+
+
 
 module.exports = router;
