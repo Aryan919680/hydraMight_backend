@@ -11,7 +11,7 @@ const adminLocationRoutes = require('./routes/admin.location.routes');
 const adminMainInventoryRoutes = require("./routes/admin.main-inventory.routes");
 const customerAuthRoutes = require("./routes/customer.auth.routes");
 const adminInventoryAllocationRoutes = require("./routes/admin.inventory-allocation.routes");
-
+const customerSalesOrderRoutes = require("./routes/customer.sales-order.routes");
 
 const app = express();
 
@@ -36,7 +36,7 @@ app.use("/api/customer/auth", customerAuthRoutes);
 
 // customer product/public routes after auth
 app.use("/api/customer", customerProductRoutes);
-
+app.use("/api/customer/orders", customerSalesOrderRoutes);
 app.use('/uploads', express.static('uploads'));
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'API route not found' });
