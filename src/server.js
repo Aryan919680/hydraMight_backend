@@ -9,7 +9,7 @@ const customerProductRoutes = require('./routes/customer.product.routes');
 const adminInventoryRoutes = require('./routes/admin.inventory.routes');
 const adminLocationRoutes = require('./routes/admin.location.routes');
 const adminMainInventoryRoutes = require("./routes/admin.main-inventory.routes");
-// const customerAuthRoutes = require("./routes/customer.auth.routes");
+const customerAuthRoutes = require("./routes/customer.auth.routes");
 const adminInventoryAllocationRoutes = require("./routes/admin.inventory-allocation.routes");
 
 
@@ -23,16 +23,21 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+
 app.use('/api/admin/categories', adminCategoryRoutes);
 app.use('/api/admin/products', adminProductRoutes);
 app.use('/api/admin/inventory', adminInventoryRoutes);
-app.use('/uploads', express.static('uploads'));
 app.use('/api/admin/locations', adminLocationRoutes);
-app.use("/api/customer", customerProductRoutes);
-// app.use("/api/customer/auth", customerAuthRoutes);
-app.use("/api/admin/main-inventory", adminMainInventoryRoutes);
+app.use('/api/admin/main-inventory', adminMainInventoryRoutes);
+app.use('/api/admin/inventory-allocations', adminInventoryAllocationRoutes);
 
-app.use("/api/admin/inventory-allocations", adminInventoryAllocationRoutes);
+// customer auth first
+app.use("/api/customer/auth", customerAuthRoutes);
+
+// customer product/public routes after auth
+app.use("/api/customer", customerProductRoutes);
+
+app.use('/uploads', express.static('uploads'));
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'API route not found' });
 });
