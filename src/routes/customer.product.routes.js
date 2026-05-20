@@ -347,6 +347,286 @@ router.get("/products/:slug", async (req, res) => {
   }
 });
 
+/**
+ * SEARCH customer products.
+ *
+ * Examples:
+ * /api/customer/products/search?q=floor&service_location_id=uuid&ecom_channel=household
+ * /api/customer/products/search?q=detergent&service_location_id=uuid&ecom_channel=household&category_slug=laundry-care
+ * /api/customer/products/search?q=cleaner&min_price=100&max_price=500&sort=price_low_to_high
+ */
+router.get("/products/search", async (req, res) => {
+  try {
+    const {
+      q,
+      search,
+
+      service_location_id,
+      location_id,
+
+      ecom_channel,
+      portal_type,
+
+      category_slug,
+      min_price,
+      max_price,
+
+      featured,
+      in_stock = "true",
+
+      sort = "relevance",
+
+      limit = 20,
+      offset = 0,
+    } = req.query;
+
+    const finalSearch = String(q || search || "").trim();
+    const finalLocationId = service_location_id || location_id;
+    const finalEcomChannel = ecom_channel || portal_type;
+
+    const conditions = [];
+    const params = [];
+
+    if (finalLocationId) {
+      params.push(finalLocationId);
+      conditions.push(`cpl.service_location_id = $${params.length}`);
+    }
+
+    if (finalEcomChannel) {
+      if (!["household", "commercial"].includes(finalEcomChannel)) {
+        return res.status(400).json({
+          success: false,
+          message: "ecom_channel must be household or commercial",
+        });
+      }
+
+      params.push(finalEcomChannel);
+      conditions.push(`cpl.ecom_channel = $${params.length}`);
+    }
+
+    if (category_slug) {
+      params.push(category_slug);
+      conditions.push(`cpl.category_slug = $${params.length}`);
+    }
+
+    if (featured === "true") {
+      conditions.push(`cpl.is_featured = true`);
+    }
+
+    if (in_stock !== "false") {
+      conditions.push(`cpl.available_stock > 0`);
+      conditions.push(`cpl.is_out_of_stock = false`);
+    }
+
+    if (min_price !== undefined && min_price !== "") {
+      params.push(Number(min_price));
+      conditions.push(`cpl.selling_price >= $${params.length}`);
+    }
+
+    if (max_price !== undefined && max_price !== "") {
+      params.push(Number(max_price));
+      conditions.push(`cpl.selling_price <= $${params.length}`);
+    }
+
+    let relevanceSelect = `0 as relevance_score`;
+
+    if (finalSearch) {
+      params.push(`%${finalSearch}%`);
+      const likeParam = `$${params.length}`;
+
+      params.push(finalSearch);
+      const exactParam = `$${params.length}`;
+
+      conditions.push(`
+        (
+          cpl.name ilike ${likeParam}
+          or cpl.sku ilike ${likeParam}
+          or cpl.brand ilike ${likeParam}
+          or cpl.category_name ilike ${likeParam}
+          or cpl.short_description ilike ${likeParam}
+          or cpl.description ilike ${likeParam}
+        )
+      `);
+
+      relevanceSelect = `
+        case
+          when lower(cpl.name) = lower(${exactParam}) then 100
+          when cpl.name ilike ${likeParam} then 80
+          when cpl.sku ilike ${likeParam} then 75
+          when cpl.category_name ilike ${likeParam} then 60
+          when cpl.brand ilike ${likeParam} then 50
+          when cpl.short_description ilike ${likeParam} then 40
+          when cpl.description ilike ${likeParam} then 30
+          else 0
+        end as relevance_score
+      `;
+    }
+
+    const safeLimit = Math.min(Number(limit) || 20, 50);
+    const safeOffset = Number(offset) || 0;
+
+    params.push(safeLimit);
+    const limitParam = `$${params.length}`;
+
+    params.push(safeOffset);
+    const offsetParam = `$${params.length}`;
+
+    const whereClause = conditions.length
+      ? `where ${conditions.join(" and ")}`
+      : "";
+
+    let orderBy = `relevance_score desc, up.is_featured desc, up.name asc`;
+
+    if (sort === "price_low_to_high") {
+      orderBy = `up.selling_price asc nulls last, up.name asc`;
+    }
+
+    if (sort === "price_high_to_low") {
+      orderBy = `up.selling_price desc nulls last, up.name asc`;
+    }
+
+    if (sort === "newest") {
+      orderBy = `up.name asc`;
+    }
+
+    if (sort === "stock_high_to_low") {
+      orderBy = `up.available_stock desc, up.name asc`;
+    }
+
+    const result = await db.query(
+      `with unique_products as (
+        select distinct on (cpl.id)
+          cpl.id,
+          cpl.name,
+          cpl.slug,
+          cpl.sku,
+
+          cpl.short_description,
+          cpl.description,
+          cpl.brand,
+
+          cpl.ecom_channel,
+          cpl.quantity_value,
+          cpl.quantity_unit,
+          cpl.unit,
+          cpl.weight,
+
+          cpl.mrp,
+          cpl.selling_price,
+          cpl.currency,
+
+          cpl.is_featured,
+
+          cpl.category_id,
+          cpl.category_name,
+          cpl.category_slug,
+
+          cpl.service_location_id,
+          cpl.service_location_name,
+          cpl.service_location_city,
+          cpl.service_location_state,
+          cpl.service_location_pincode,
+
+          cpl.allocated_stock,
+          cpl.reserved_stock,
+          cpl.available_stock,
+          cpl.is_out_of_stock,
+          cpl.is_low_stock,
+
+          cpl.primary_image,
+
+          ${relevanceSelect}
+
+        from customer_product_listing cpl
+
+        ${whereClause}
+
+        order by
+          cpl.id,
+          cpl.available_stock desc,
+          cpl.is_featured desc
+      ),
+
+      total_count as (
+        select count(*)::int as total
+        from unique_products
+      )
+
+      select
+        up.*,
+
+        tc.total,
+
+        coalesce(
+          (
+            select json_agg(
+              json_build_object(
+                'id', pi.id,
+                'image_url', pi.image_url,
+                'storage_bucket', pi.storage_bucket,
+                'storage_path', pi.storage_path,
+                'file_name', pi.file_name,
+                'mime_type', pi.mime_type,
+                'file_size', pi.file_size,
+                'alt_text', pi.alt_text,
+                'is_primary', pi.is_primary,
+                'display_order', pi.display_order
+              )
+              order by pi.is_primary desc, pi.display_order asc, pi.created_at asc
+            )
+            from product_images pi
+            where pi.product_id = up.id
+            and coalesce(pi.is_active, true) = true
+          ),
+          '[]'::json
+        ) as images
+
+      from unique_products up
+      cross join total_count tc
+
+      order by ${orderBy}
+
+      limit ${limitParam}
+      offset ${offsetParam}`,
+      params
+    );
+
+    const total = result.rows.length > 0 ? Number(result.rows[0].total || 0) : 0;
+
+    const data = result.rows.map((row) => {
+      const { total, ...product } = row;
+      return product;
+    });
+
+    res.json({
+      success: true,
+      query: finalSearch,
+      filters: {
+        service_location_id: finalLocationId || null,
+        ecom_channel: finalEcomChannel || null,
+        category_slug: category_slug || null,
+        min_price: min_price || null,
+        max_price: max_price || null,
+        in_stock,
+        sort,
+      },
+      pagination: {
+        total,
+        limit: safeLimit,
+        offset: safeOffset,
+        has_more: safeOffset + safeLimit < total,
+      },
+      data,
+    });
+  } catch (error) {
+    console.error("Customer product search error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to search products",
+    });
+  }
+});
 
 /**
  * GET product detail by id.
