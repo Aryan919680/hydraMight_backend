@@ -406,4 +406,90 @@ router.get("/me", async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/customer/auth/profile
+ *
+ * Update customer profile
+ */
+router.put("/profile", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.substring(7)
+      : null;
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Authorization token is required",
+      });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const {
+      full_name,
+      email,
+      customer_type = "household",
+    } = req.body;
+
+    if (customer_type && !["household", "commercial"].includes(customer_type)) {
+      return res.status(400).json({
+        success: false,
+        message: "customer_type must be household or commercial",
+      });
+    }
+
+    const result = await db.query(
+      `update user_profiles
+       set
+        full_name = coalesce($1, full_name),
+        email = coalesce($2, email),
+        customer_type = coalesce($3, customer_type),
+        updated_at = now()
+       where id = $4
+       and user_type = 'customer'
+       and status = 'active'
+       returning
+        id,
+        full_name,
+        mobile,
+        email,
+        user_type,
+        customer_type,
+        status,
+        is_mobile_verified,
+        last_login_at,
+        created_at,
+        updated_at`,
+      [
+        full_name || null,
+        email || null,
+        customer_type || null,
+        decoded.id,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Customer profile update error:", error);
+
+    res.status(401).json({
+      success: false,
+      message: error.message || "Failed to update profile",
+    });
+  }
+});
+
 module.exports = router;
