@@ -12,7 +12,8 @@ const adminMainInventoryRoutes = require("./routes/admin.main-inventory.routes")
 const customerAuthRoutes = require("./routes/customer.auth.routes");
 const adminInventoryAllocationRoutes = require("./routes/admin.inventory-allocation.routes");
 const customerSalesOrderRoutes = require("./routes/customer.sales-order.routes");
-
+const customerCommercialAuthRoutes = require("./routes/customer.commercial-auth.routes");
+const adminCommercialSignupRoutes = require("./routes/admin.commercial-signup.routes");
 const app = express();
 
 app.use(cors());
@@ -30,9 +31,12 @@ app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/locations', adminLocationRoutes);
 app.use('/api/admin/main-inventory', adminMainInventoryRoutes);
 app.use('/api/admin/inventory-allocations', adminInventoryAllocationRoutes);
+app.use("/api/admin/commercial-signups", adminCommercialSignupRoutes);
 
 // customer auth first
 app.use("/api/customer/auth", customerAuthRoutes);
+app.use("/api/customer/commercial", customerCommercialAuthRoutes);
+
 
 // customer product/public routes after auth
 app.use("/api/customer", customerProductRoutes);
