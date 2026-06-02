@@ -18,7 +18,80 @@ function toNumber(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n : 0;
 }
+async function validateCustomerForChannel(client, customerId, requestedChannel) {
+  const profileResult = await client.query(
+    `select
+       up.id,
+       up.full_name,
+       up.mobile,
+       up.email,
+       up.customer_type,
+       up.status
+     from user_profiles up
+     where up.id = $1
+     limit 1`,
+    [customerId]
+  );
 
+  if (profileResult.rows.length === 0) {
+    throw new Error("Customer profile not found");
+  }
+
+  const profile = profileResult.rows[0];
+
+  if (profile.status !== "active") {
+    throw new Error("Customer account is not active");
+  }
+
+  if (requestedChannel === "household") {
+    if (profile.customer_type && profile.customer_type !== "household") {
+      throw new Error("This account is not allowed to place household orders");
+    }
+
+    return {
+      profile,
+      commercialCustomer: null,
+    };
+  }
+
+  if (requestedChannel === "commercial") {
+    if (profile.customer_type !== "commercial") {
+      throw new Error("This account is not registered as commercial customer");
+    }
+
+    const commercialResult = await client.query(
+      `select
+         cc.id,
+         cc.business_name,
+         cc.contact_person,
+         cc.gst_number,
+         cc.email,
+         cc.phone,
+         cc.status
+       from commercial_customers cc
+       where cc.user_profile_id = $1
+       limit 1`,
+      [customerId]
+    );
+
+    if (commercialResult.rows.length === 0) {
+      throw new Error("Commercial customer profile not found");
+    }
+
+    const commercialCustomer = commercialResult.rows[0];
+
+    if (commercialCustomer.status !== "approved") {
+      throw new Error("Commercial account is not approved yet");
+    }
+
+    return {
+      profile,
+      commercialCustomer,
+    };
+  }
+
+  throw new Error("Invalid ecom_channel");
+}
 /**
  * POST /api/customer/orders
  *
@@ -75,37 +148,53 @@ router.post("/", async (req, res) => {
 
     await client.query("BEGIN");
 
+    const { profile, commercialCustomer } = await validateCustomerForChannel(
+  client,
+  req.customer.id,
+  finalEcomChannel
+);
+
     const orderNumber = generateOrderNumber();
 
-    const orderResult = await client.query(
-      `insert into sales_orders
-       (
-        order_number,
-        customer_id,
-        customer_mobile,
-        channel,
-        sub_channel,
-        service_location_id,
-        order_status,
-        payment_status,
-        delivery_address,
-        remarks,
-        placed_at,
-        updated_at
-       )
-       values
-       ($1,$2,$3,'ecom',$4,$5,'placed','pending',$6,$7,now(),now())
-       returning *`,
-      [
-        orderNumber,
-        req.customer.id,
-        req.customer.mobile,
-        finalEcomChannel,
-        finalLocationId,
-        delivery_address || null,
-        remarks || null,
-      ]
-    );
+const orderResult = await client.query(
+  `insert into sales_orders
+   (
+    order_number,
+    customer_id,
+    customer_mobile,
+    channel,
+    sub_channel,
+    customer_type,
+    commercial_customer_id,
+    business_name,
+    gst_number,
+    contact_person,
+    service_location_id,
+    order_status,
+    payment_status,
+    delivery_address,
+    remarks,
+    placed_at,
+    updated_at
+   )
+   values
+   ($1,$2,$3,'ecom',$4,$5,$6,$7,$8,$9,$10,'placed','pending',$11,$12,now(),now())
+   returning *`,
+  [
+    orderNumber,
+    req.customer.id,
+    profile.mobile || req.customer.mobile || commercialCustomer?.phone || null,
+    finalEcomChannel,
+    finalEcomChannel,
+    commercialCustomer?.id || null,
+    commercialCustomer?.business_name || null,
+    commercialCustomer?.gst_number || null,
+    commercialCustomer?.contact_person || null,
+    finalLocationId,
+    delivery_address || null,
+    remarks || null,
+  ]
+);
 
     const order = orderResult.rows[0];
 
