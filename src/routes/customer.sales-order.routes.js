@@ -147,7 +147,8 @@ router.post("/", async (req, res) => {
     }
 
     await client.query("BEGIN");
-
+console.log("ORDER CUSTOMER:", req.customer);
+console.log("ORDER CHANNEL:", finalEcomChannel);
     const { profile, commercialCustomer } = await validateCustomerForChannel(
   client,
   req.customer.id,

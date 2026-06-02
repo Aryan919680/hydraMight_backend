@@ -67,8 +67,11 @@ function createCommercialToken(user) {
  *
  * Public API.
  * Commercial customer raises signup request.
+ * Also creates/updates pending commercial customer master row.
  */
 router.post("/signup-request", async (req, res) => {
+  const client = await db.pool.connect();
+
   try {
     const {
       business_name,
@@ -121,7 +124,31 @@ router.post("/signup-request", async (req, res) => {
       });
     }
 
-    const result = await db.query(
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    const cleanBusinessName = String(business_name).trim();
+    const cleanContactPerson = String(contact_person).trim();
+
+    const billingAddress = {
+      address_line1: String(address_line1).trim(),
+      address_line2: address_line2 ? String(address_line2).trim() : null,
+      city: String(city).trim(),
+      state: String(state).trim(),
+      pincode: String(pincode).trim(),
+    };
+
+    await client.query("BEGIN");
+
+    console.log("COMMERCIAL SIGNUP REQUEST START:", {
+      email: normalizedEmail,
+      phone: normalizedPhone,
+      business_name: cleanBusinessName,
+    });
+
+    /**
+     * 1. Upsert signup request.
+     */
+    const signupResult = await client.query(
       `insert into commercial_signup_requests
        (
         business_name,
@@ -141,6 +168,24 @@ router.post("/signup-request", async (req, res) => {
        )
        values
        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',now(),now())
+       on conflict (email)
+       do update set
+        business_name = excluded.business_name,
+        contact_person = excluded.contact_person,
+        gst_number = excluded.gst_number,
+        phone = excluded.phone,
+        business_type = excluded.business_type,
+        address_line1 = excluded.address_line1,
+        address_line2 = excluded.address_line2,
+        city = excluded.city,
+        state = excluded.state,
+        pincode = excluded.pincode,
+        status = case
+          when commercial_signup_requests.status = 'approved'
+          then commercial_signup_requests.status
+          else 'pending'
+        end,
+        updated_at = now()
        returning
         id,
         business_name,
@@ -155,41 +200,118 @@ router.post("/signup-request", async (req, res) => {
         state,
         pincode,
         status,
-        created_at`,
+        created_at,
+        updated_at`,
       [
-        String(business_name).trim(),
-        String(contact_person).trim(),
+        cleanBusinessName,
+        cleanContactPerson,
         gst_number ? String(gst_number).trim() : null,
-        String(email).trim().toLowerCase(),
+        normalizedEmail,
         normalizedPhone,
         business_type ? String(business_type).trim() : null,
-        String(address_line1).trim(),
-        address_line2 ? String(address_line2).trim() : null,
-        String(city).trim(),
-        String(state).trim(),
-        String(pincode).trim(),
+        billingAddress.address_line1,
+        billingAddress.address_line2,
+        billingAddress.city,
+        billingAddress.state,
+        billingAddress.pincode,
       ]
     );
 
-    res.status(201).json({
+    const signupRequest = signupResult.rows[0];
+
+    /**
+     * 2. Upsert commercial customer master as pending.
+     * user_profile_id will be null until admin approves.
+     */
+    const commercialCustomerResult = await client.query(
+      `insert into commercial_customers
+       (
+        user_profile_id,
+        business_name,
+        contact_person,
+        gst_number,
+        email,
+        phone,
+        address,
+        status,
+        created_at,
+        updated_at
+       )
+       values
+       (
+        null,
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6::jsonb,
+        'pending',
+        now(),
+        now()
+       )
+       on conflict (email)
+       do update set
+        business_name = excluded.business_name,
+        contact_person = excluded.contact_person,
+        gst_number = excluded.gst_number,
+        phone = excluded.phone,
+        address = excluded.address,
+        status = case
+          when commercial_customers.status = 'approved'
+          then commercial_customers.status
+          else 'pending'
+        end,
+        updated_at = now()
+       returning *`,
+      [
+        cleanBusinessName,
+        cleanContactPerson,
+        gst_number ? String(gst_number).trim() : null,
+        normalizedEmail,
+        normalizedPhone,
+        JSON.stringify(billingAddress),
+      ]
+    );
+
+    console.log("COMMERCIAL SIGNUP CREATED:", {
+      signup_request_id: signupRequest.id,
+      signup_status: signupRequest.status,
+      commercial_customer_id: commercialCustomerResult.rows[0]?.id,
+      commercial_customer_status: commercialCustomerResult.rows[0]?.status,
+    });
+
+    await client.query("COMMIT");
+
+    return res.status(201).json({
       success: true,
       message: "Commercial signup request submitted successfully",
-      data: result.rows[0],
+      data: {
+        signup_request: signupRequest,
+        commercial_customer: commercialCustomerResult.rows[0],
+      },
     });
   } catch (error) {
-    console.error("Commercial signup request error:", error);
+    await client.query("ROLLBACK");
 
-    if (error.code === "23505") {
-      return res.status(409).json({
-        success: false,
-        message: "Signup request already exists for this email or phone",
-      });
-    }
+    console.error("Commercial signup request error:", {
+      code: error.code,
+      constraint: error.constraint,
+      detail: error.detail,
+      message: error.message,
+    });
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message || "Failed to submit signup request",
+      db_error: {
+        code: error.code,
+        constraint: error.constraint,
+        detail: error.detail,
+      },
     });
+  } finally {
+    client.release();
   }
 });
 
