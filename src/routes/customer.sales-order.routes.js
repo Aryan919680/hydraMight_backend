@@ -1,5 +1,6 @@
 const express = require("express");
 const db = require("../config/db");
+const pool = db.pool || db;
 const { authenticateCustomer } = require("../middleware/customerAuth.middleware");
 
 const router = express.Router();
@@ -109,9 +110,10 @@ async function validateCustomerForChannel(client, customerId, requestedChannel) 
  * }
  */
 router.post("/", async (req, res) => {
-  const client = await db.pool.connect();
+  let client;
 
   try {
+    client = await pool.connect();
     const {
       service_location_id,
       location_id,
@@ -425,7 +427,9 @@ const orderResult = await client.query(
       },
     });
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
 
     console.error("Place sales order error:", error);
 
@@ -434,7 +438,7 @@ const orderResult = await client.query(
       message: error.message || "Failed to place order",
     });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
@@ -447,7 +451,7 @@ router.get("/", async (req, res) => {
   try {
     const { limit = 20, offset = 0 } = req.query;
 
-    const result = await db.query(
+    const result = await pool.query(
       `select
         so.*,
 
@@ -499,7 +503,7 @@ router.get("/", async (req, res) => {
  */
 router.get("/:id", async (req, res) => {
   try {
-    const orderResult = await db.query(
+    const orderResult = await pool.query(
       `select *
        from sales_orders
        where id = $1
@@ -515,7 +519,7 @@ router.get("/:id", async (req, res) => {
       });
     }
 
-    const itemsResult = await db.query(
+    const itemsResult = await pool.query(
       `select *
        from sales_order_items
        where order_id = $1
@@ -523,7 +527,7 @@ router.get("/:id", async (req, res) => {
       [req.params.id]
     );
 
-    const returnsResult = await db.query(
+    const returnsResult = await pool.query(
       `select *
        from sales_returns
        where order_id = $1
@@ -563,9 +567,10 @@ router.get("/:id", async (req, res) => {
  * }
  */
 router.post("/:id/return", async (req, res) => {
-  const client = await db.pool.connect();
+  let client;
 
   try {
+    client = await pool.connect();
     const { reason, items } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
@@ -815,7 +820,9 @@ router.post("/:id/return", async (req, res) => {
       },
     });
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
 
     console.error("Return sales order error:", error);
 
@@ -824,7 +831,7 @@ router.post("/:id/return", async (req, res) => {
       message: error.message || "Failed to return order",
     });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 

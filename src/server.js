@@ -17,6 +17,8 @@ const adminCommercialSignupRoutes = require("./routes/admin.commercial-signup.ro
 const adminDistributorRoutes = require("./routes/adminDistributor.routes");
 const distributorAuthRoutes = require("./routes/distributorAuth.routes");
 const agencySignupRequestRoutes = require("./routes/agencySignupRequest.routes");
+const distributorCatalogRoutes = require("./routes/distributorCatalog.routes");
+const distributorOrderRoutes = require("./routes/distributorOrder.routes");
 
 const app = express();
 
@@ -78,6 +80,8 @@ app.use("/api/customer/commercial", customerCommercialAuthRoutes);
 
 app.use("/api/distributor/auth", distributorAuthRoutes);
 app.use("/api/distributor/agency-requests", agencySignupRequestRoutes);
+app.use("/api/distributor/catalog", distributorCatalogRoutes);
+app.use("/api/distributor/orders", distributorOrderRoutes);
 
 app.use("/api/customer/orders", customerSalesOrderRoutes);
 app.use("/api/customer", customerProductRoutes);

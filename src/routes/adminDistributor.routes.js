@@ -1,7 +1,8 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const { randomUUID } = require("crypto");
-const pool = require("../config/db");
+const db = require("../config/db");
+const pool = db.pool || db;
 
 const router = express.Router();
 
@@ -332,9 +333,10 @@ router.get("/stockists", async (req, res) => {
  * POST /api/admin/distributors/agencies
  */
 router.post("/agencies",  async (req, res) => {
-  const client = await pool.connect();
+  let client;
 
   try {
+    client = await pool.connect();
     const requiredFields = [
       "stockist_id",
       "gst_number",
@@ -515,7 +517,9 @@ router.post("/agencies",  async (req, res) => {
       },
     });
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
 
     console.error("CREATE AGENCY ERROR:", error);
 
@@ -533,7 +537,7 @@ router.post("/agencies",  async (req, res) => {
       error: error.message,
     });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
