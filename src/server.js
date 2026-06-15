@@ -20,7 +20,46 @@ const agencySignupRequestRoutes = require("./routes/agencySignupRequest.routes")
 
 const app = express();
 
-app.use(cors());
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:3000",
+  "http://localhost:8080",
+  "https://hydra-might-admin-frontend.vercel.app",
+  "https://hydramight-distributor-ui.vercel.app"
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow Postman, curl, mobile apps, server-to-server calls
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.log("CORS BLOCKED ORIGIN:", origin);
+
+    return callback(new Error(`CORS not allowed for origin: ${origin}`));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "Origin",
+    "X-Requested-With"
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+app.use(express.json({ limit: "5mb" }));
 app.use(express.json({ limit: '5mb' }));
 
 app.get('/health', (req, res) => {
