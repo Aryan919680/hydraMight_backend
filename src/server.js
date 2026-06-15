@@ -26,7 +26,9 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:8080",
   "https://hydra-might-admin-frontend.vercel.app",
-  "https://hydramight-distributor-ui.vercel.app"
+  "https://hydramight-distributor-ui.vercel.app",
+  "https://hydramight-ecom.vercel.app",
+  "https://hydra-might-commercial-frontend.vercel.app"
 ];
 
 const corsOptions = {
