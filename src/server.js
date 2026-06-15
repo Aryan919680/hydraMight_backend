@@ -21,21 +21,37 @@ const agencySignupRequestRoutes = require("./routes/agencySignupRequest.routes")
 const app = express();
 
 /**
- * TEMP OPEN CORS
- * Allows all origins for now.
- * Use restricted origins again before final production release.
+ * FORCE OPEN CORS - TEMP
  */
+app.use((req, res, next) => {
+  const origin = req.headers.origin || "*";
+
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header("Vary", "Origin");
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
+  res.header(
+    "Access-Control-Allow-Headers",
+    req.headers["access-control-request-headers"] ||
+      "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send();
+  }
+
+  next();
+});
+
 app.use(
   cors({
     origin: true,
     credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: "*",
-    optionsSuccessStatus: 204,
   })
 );
-
-app.options("*", cors());
 
 app.use(express.json({ limit: "5mb" }));
 
@@ -46,14 +62,8 @@ app.get("/health", (req, res) => {
   });
 });
 
-/**
- * Auth
- */
 app.use("/api/auth", authRoutes);
 
-/**
- * Admin routes
- */
 app.use("/api/admin/categories", adminCategoryRoutes);
 app.use("/api/admin/products", adminProductRoutes);
 app.use("/api/admin/inventory", adminInventoryRoutes);
@@ -63,28 +73,17 @@ app.use("/api/admin/inventory-allocations", adminInventoryAllocationRoutes);
 app.use("/api/admin/commercial-signups", adminCommercialSignupRoutes);
 app.use("/api/admin/distributors", adminDistributorRoutes);
 
-/**
- * Customer / commercial / distributor auth routes
- */
 app.use("/api/customer/auth", customerAuthRoutes);
 app.use("/api/customer/commercial", customerCommercialAuthRoutes);
+
 app.use("/api/distributor/auth", distributorAuthRoutes);
 app.use("/api/distributor/agency-requests", agencySignupRequestRoutes);
 
-/**
- * Customer public/product/order routes
- */
 app.use("/api/customer/orders", customerSalesOrderRoutes);
 app.use("/api/customer", customerProductRoutes);
 
-/**
- * Static uploads
- */
 app.use("/uploads", express.static("uploads"));
 
-/**
- * 404 handler
- */
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -93,11 +92,12 @@ app.use((req, res) => {
   });
 });
 
-/**
- * Error handler
- */
 app.use((err, req, res, next) => {
   console.error("Server error:", err);
+
+  const origin = req.headers.origin || "*";
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header("Access-Control-Allow-Credentials", "true");
 
   res.status(err.status || 500).json({
     success: false,
