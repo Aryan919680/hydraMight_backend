@@ -21,6 +21,8 @@ const distributorCatalogRoutes = require("./routes/distributorCatalog.routes");
 const distributorOrderRoutes = require("./routes/distributorOrder.routes");
 const adminDistributorProductRoutes = require("./routes/admin.distributor-product.routes");
 const adminOrderRoutes = require("./routes/admin.orders.routes");
+const stockistPurchaseRoutes = require("./routes/stockist.purchase.routes");
+
 const app = express();
 
 /**
@@ -88,6 +90,7 @@ app.use("/api/distributor/orders", distributorOrderRoutes);
 app.use("/api/customer/orders", customerSalesOrderRoutes);
 app.use("/api/customer", customerProductRoutes);
 
+app.use("/api/stockist", stockistPurchaseRoutes);
 app.use("/uploads", express.static("uploads"));
 
 app.use((req, res) => {

@@ -63,6 +63,13 @@ const DELIVERY_STATUSES = new Set([
   "returned",
 ]);
 
+const STOCKIST_PURCHASE_PAYMENT_STATUSES = new Set([
+  "pending",
+  "paid",
+  "failed",
+  "refunded",
+]);
+
 const getAdminId = (req) => req.user?.id || req.admin?.id || null;
 
 const clamp = (value, fallback, max) => {
@@ -76,6 +83,20 @@ const clamp = (value, fallback, max) => {
 };
 
 const normalizePortal = (value) => String(value || "").trim().toLowerCase();
+
+function isStockistPurchaseOrder(order) {
+  return order?.source_type === "stockist_purchase";
+}
+
+function tableForOrder(portalType, order) {
+  if (portalType === "distributor" && isStockistPurchaseOrder(order)) {
+    return "public.stockist_purchase_orders";
+  }
+
+  return portalType === "distributor"
+    ? "public.distributor_orders"
+    : "public.sales_orders";
+}
 
 function salesPortalCondition(portalType, alias = "so") {
   if (portalType === "household") {
@@ -113,11 +134,12 @@ function salesPortalCondition(portalType, alias = "so") {
 }
 
 /**
- * Combines:
- * 1. Household orders from sales_orders
- * 2. Commercial orders from sales_orders
- * 3. White-label orders from sales_orders
- * 4. Distributor orders from distributor_orders
+ * Unified order-management result:
+ * 1. Household orders
+ * 2. Commercial orders
+ * 3. White-label orders
+ * 4. Existing distributor/agency orders
+ * 5. New stockist purchase orders
  */
 function getUnifiedOrdersSql() {
   return `
@@ -138,7 +160,7 @@ function getUnifiedOrdersSql() {
         else 'household'
       end as portal_type,
 
-      'sales_orders' as source_table,
+      'sales_orders'::text as source_table,
       null::text as source_type,
 
       so.customer_id::text as customer_id,
@@ -174,7 +196,7 @@ function getUnifiedOrdersSql() {
       coalesce(so.delivery_charge, 0)::numeric as delivery_charge,
       coalesce(so.total_amount, 0)::numeric as total_amount,
 
-      so.delivery_address,
+      so.delivery_address::text as delivery_address,
       so.remarks,
       so.placed_at,
       so.placed_at as created_at,
@@ -200,10 +222,10 @@ function getUnifiedOrdersSql() {
       doo.id::text as id,
       doo.order_number,
 
-      'distributor' as portal_type,
+      'distributor'::text as portal_type,
 
-      'distributor_orders' as source_table,
-      doo.order_type as source_type,
+      'distributor_orders'::text as source_table,
+      doo.order_type::text as source_type,
 
       doo.user_profile_id::text as customer_id,
 
@@ -243,7 +265,7 @@ function getUnifiedOrdersSql() {
       coalesce(doo.delivery_charge, 0)::numeric as delivery_charge,
       coalesce(doo.total_amount, 0)::numeric as total_amount,
 
-      doo.delivery_address,
+      doo.delivery_address::text as delivery_address,
       doo.remarks,
       doo.placed_at,
       doo.placed_at as created_at,
@@ -265,6 +287,62 @@ function getUnifiedOrdersSql() {
 
     left join public.user_profiles up
       on up.id = doo.user_profile_id
+
+    union all
+
+    select
+      spo.id::text as id,
+      spo.order_number,
+
+      'distributor'::text as portal_type,
+
+      'stockist_purchase_orders'::text as source_table,
+      'stockist_purchase'::text as source_type,
+
+      null::text as customer_id,
+
+      coalesce(
+        s.business_name,
+        s.contact_person,
+        'Stockist'
+      ) as customer_name,
+
+      s.mobile as customer_phone,
+      s.email as customer_email,
+
+      s.business_name,
+      s.contact_person,
+      s.gst_number,
+
+      null::text as service_location_id,
+      s.territory as location_name,
+
+      spo.order_status,
+      spo.payment_status,
+      coalesce(spo.delivery_status, 'not_started') as delivery_status,
+
+      coalesce(spo.subtotal, 0)::numeric as subtotal,
+      0::numeric as discount_amount,
+      0::numeric as tax_amount,
+      0::numeric as delivery_charge,
+      coalesce(spo.total_amount, 0)::numeric as total_amount,
+
+      null::text as delivery_address,
+      spo.remarks,
+      spo.placed_at,
+      coalesce(spo.created_at, spo.placed_at) as created_at,
+      spo.updated_at,
+
+      (
+        select count(*)::int
+        from public.stockist_purchase_order_items spoi
+        where spoi.stockist_purchase_order_id = spo.id
+      ) as item_count
+
+    from public.stockist_purchase_orders spo
+
+    join public.stockists s
+      on s.id = spo.stockist_id
   `;
 }
 
@@ -274,7 +352,7 @@ async function findOrder(client, portalType, orderId, lock = false) {
   }
 
   if (portalType === "distributor") {
-    const result = await client.query(
+    const distributorOrderResult = await client.query(
       `
       select
         id,
@@ -282,7 +360,9 @@ async function findOrder(client, portalType, orderId, lock = false) {
         order_status,
         payment_status,
         coalesce(delivery_status, 'not_started') as delivery_status,
-        created_at
+        created_at,
+        'distributor_orders'::text as source_table,
+        order_type::text as source_type
       from public.distributor_orders
       where id = $1
       ${lock ? "for update" : ""}
@@ -290,7 +370,29 @@ async function findOrder(client, portalType, orderId, lock = false) {
       [orderId]
     );
 
-    return result.rows[0] || null;
+    if (distributorOrderResult.rowCount > 0) {
+      return distributorOrderResult.rows[0];
+    }
+
+    const stockistPurchaseOrderResult = await client.query(
+      `
+      select
+        id,
+        order_number,
+        order_status,
+        payment_status,
+        coalesce(delivery_status, 'not_started') as delivery_status,
+        created_at,
+        'stockist_purchase_orders'::text as source_table,
+        'stockist_purchase'::text as source_type
+      from public.stockist_purchase_orders
+      where id = $1
+      ${lock ? "for update" : ""}
+      `,
+      [orderId]
+    );
+
+    return stockistPurchaseOrderResult.rows[0] || null;
   }
 
   const result = await client.query(
@@ -303,7 +405,9 @@ async function findOrder(client, portalType, orderId, lock = false) {
       coalesce(delivery_status, 'not_started') as delivery_status,
       created_at,
       sub_channel,
-      customer_type
+      customer_type,
+      'sales_orders'::text as source_table,
+      null::text as source_type
     from public.sales_orders
     where id = $1
       and ${salesPortalCondition(portalType, "sales_orders")}
@@ -444,17 +548,6 @@ router.get("/summary", async (req, res) => {
 
 /**
  * GET /api/admin/orders
- *
- * Query params:
- * portal_type=household|commercial|distributor|whitelabel
- * status=
- * payment_status=
- * delivery_status=
- * search=
- * from_date=YYYY-MM-DD
- * to_date=YYYY-MM-DD
- * limit=20
- * offset=0
  */
 router.get("/", async (req, res) => {
   try {
@@ -609,10 +702,114 @@ router.get("/:portalType/:orderId", async (req, res) => {
     }
 
     if (portalType === "distributor") {
+      const sourceOrder = await findOrder(
+        pool,
+        "distributor",
+        orderId,
+        false
+      );
+
+      if (!sourceOrder) {
+        return res.status(404).json({
+          success: false,
+          message: "Order not found",
+        });
+      }
+
+      if (isStockistPurchaseOrder(sourceOrder)) {
+        const [orderResult, itemsResult, shipmentsResult] = await Promise.all([
+          pool.query(
+            `
+            select
+              spo.*,
+              'distributor'::text as portal_type,
+              'stockist_purchase_orders'::text as source_table,
+              'stockist_purchase'::text as source_type,
+
+              coalesce(
+                s.business_name,
+                s.contact_person,
+                'Stockist'
+              ) as customer_name,
+
+              s.mobile as customer_phone,
+              s.email as customer_email,
+
+              s.business_name as stockist_business_name,
+              s.contact_person as stockist_contact_person,
+              s.mobile as stockist_mobile,
+              s.email as stockist_email,
+              s.territory as stockist_territory
+
+            from public.stockist_purchase_orders spo
+
+            join public.stockists s
+              on s.id = spo.stockist_id
+
+            where spo.id = $1
+            limit 1
+            `,
+            [orderId]
+          ),
+
+          pool.query(
+            `
+            select
+              spoi.*,
+              p.name as current_product_name,
+              p.sku as current_product_sku
+            from public.stockist_purchase_order_items spoi
+
+            left join public.products p
+              on p.id = spoi.product_id
+
+            where spoi.stockist_purchase_order_id = $1
+            order by spoi.created_at asc
+            `,
+            [orderId]
+          ),
+
+          pool.query(
+            `
+            select
+              sps.id,
+              sps.product_id,
+              sps.quantity,
+              sps.shipment_status,
+              sps.shipped_at,
+              sps.delivered_at,
+              p.name as product_name,
+              p.sku
+            from public.stockist_purchase_shipments sps
+
+            left join public.products p
+              on p.id = sps.product_id
+
+            where sps.stockist_purchase_order_id = $1
+            order by sps.shipped_at asc
+            `,
+            [orderId]
+          ),
+        ]);
+
+        return res.json({
+          success: true,
+          data: {
+            ...orderResult.rows[0],
+            items: itemsResult.rows,
+            shipments: shipmentsResult.rows,
+          },
+        });
+      }
+
       const orderResult = await pool.query(
         `
         select
           doo.*,
+
+          'distributor'::text as portal_type,
+          'distributor_orders'::text as source_table,
+          doo.order_type::text as source_type,
 
           s.business_name as stockist_business_name,
           s.contact_person as stockist_contact_person,
@@ -628,9 +825,7 @@ router.get("/:portalType/:orderId", async (req, res) => {
 
           up.full_name as user_name,
           up.email as user_email,
-          up.mobile as user_mobile,
-
-          'distributor' as portal_type
+          up.mobile as user_mobile
 
         from public.distributor_orders doo
 
@@ -648,13 +843,6 @@ router.get("/:portalType/:orderId", async (req, res) => {
         `,
         [orderId]
       );
-
-      if (orderResult.rowCount === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Order not found",
-        });
-      }
 
       const itemsResult = await pool.query(
         `
@@ -752,12 +940,6 @@ router.get("/:portalType/:orderId", async (req, res) => {
 
 /**
  * PATCH /api/admin/orders/:portalType/:orderId/status
- *
- * Body:
- * {
- *   "status": "processing",
- *   "note": "Optional admin note"
- * }
  */
 router.patch("/:portalType/:orderId/status", async (req, res) => {
   let client;
@@ -809,10 +991,17 @@ router.patch("/:portalType/:orderId/status", async (req, res) => {
       });
     }
 
-    const orderTable =
-      portalType === "distributor"
-        ? "public.distributor_orders"
-        : "public.sales_orders";
+    if (isStockistPurchaseOrder(existingOrder)) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Stockist purchase shipment and delivery are updated from the stockist portal because those actions update stockist inventory.",
+      });
+    }
+
+    const orderTable = tableForOrder(portalType, existingOrder);
 
     const updateResult = await client.query(
       `
@@ -864,12 +1053,6 @@ router.patch("/:portalType/:orderId/status", async (req, res) => {
 
 /**
  * PATCH /api/admin/orders/:portalType/:orderId/payment-status
- *
- * Body:
- * {
- *   "payment_status": "paid",
- *   "note": "Optional note"
- * }
  */
 router.patch(
   "/:portalType/:orderId/payment-status",
@@ -923,10 +1106,20 @@ router.patch(
         });
       }
 
-      const orderTable =
-        portalType === "distributor"
-          ? "public.distributor_orders"
-          : "public.sales_orders";
+      if (
+        isStockistPurchaseOrder(existingOrder) &&
+        !STOCKIST_PURCHASE_PAYMENT_STATUSES.has(paymentStatus)
+      ) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Stockist purchase payment status must be pending, paid, failed or refunded.",
+        });
+      }
+
+      const orderTable = tableForOrder(portalType, existingOrder);
 
       const updateResult = await client.query(
         `
@@ -979,12 +1172,6 @@ router.patch(
 
 /**
  * PATCH /api/admin/orders/:portalType/:orderId/delivery-status
- *
- * Body:
- * {
- *   "delivery_status": "shipped",
- *   "note": "Optional note"
- * }
  */
 router.patch(
   "/:portalType/:orderId/delivery-status",
@@ -1038,10 +1225,17 @@ router.patch(
         });
       }
 
-      const orderTable =
-        portalType === "distributor"
-          ? "public.distributor_orders"
-          : "public.sales_orders";
+      if (isStockistPurchaseOrder(existingOrder)) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Stockist purchase delivery is confirmed by the stockist from the stockist portal because it updates stockist inventory.",
+        });
+      }
+
+      const orderTable = tableForOrder(portalType, existingOrder);
 
       const updateResult = await client.query(
         `
@@ -1094,11 +1288,6 @@ router.patch(
 
 /**
  * POST /api/admin/orders/:portalType/:orderId/notes
- *
- * Body:
- * {
- *   "note": "Called customer and confirmed delivery address"
- * }
  */
 router.post("/:portalType/:orderId/notes", async (req, res) => {
   let client;
@@ -1106,7 +1295,6 @@ router.post("/:portalType/:orderId/notes", async (req, res) => {
   try {
     const portalType = normalizePortal(req.params.portalType);
     const { orderId } = req.params;
-
     const note = String(req.body.note || "").trim();
 
     if (!PORTALS.has(portalType)) {
