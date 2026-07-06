@@ -1,18 +1,77 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const pool = require("../config/db");
+const db = require("../config/db");
 
+const pool = db.pool || db;
 const router = express.Router();
 
-const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+const normalizeEmail = (email) =>
+  String(email || "").trim().toLowerCase();
 
-/**
- * Distributor Login
- * Stockist and Agency login from user_profiles table
- *
- * POST /api/distributor/auth/login
- */
+async function getStockistProfile(userProfileId) {
+  const result = await pool.query(
+    `
+    select *
+    from public.stockists
+    where user_profile_id = $1
+    limit 1
+    `,
+    [userProfileId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getAgencyProfile(userProfileId) {
+  const result = await pool.query(
+    `
+    select
+      a.*,
+
+      'stockist'::text as fulfillment_source,
+
+      s.business_name as stockist_business_name,
+      s.gst_number as stockist_gst_number,
+      s.status as stockist_status
+
+    from public.agencies a
+
+    left join public.stockists s
+      on s.id = a.stockist_id
+
+    where a.user_profile_id = $1
+    limit 1
+    `,
+    [userProfileId]
+  );
+
+  return result.rows[0] || null;
+}
+
+function validateAgencySupplier(agency) {
+  if (!agency) {
+    return "Agency profile not found";
+  }
+
+  if (String(agency.status || "").toLowerCase() !== "active") {
+    return "Agency account is inactive";
+  }
+
+  /*
+    Unassigned agency is valid.
+    It can browse all active Stockist catalogues.
+  */
+  if (
+    agency.stockist_id &&
+    String(agency.stockist_status || "").toLowerCase() !== "active"
+  ) {
+    return "Assigned stockist is inactive";
+  }
+
+  return null;
+}
+
 router.post("/login", async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
@@ -53,19 +112,19 @@ router.post("/login", async (req, res) => {
 
     const user = userResult.rows[0];
 
-    if (user.status !== "active") {
+    if (String(user.status || "").toLowerCase() !== "active") {
       return res.status(403).json({
         success: false,
         message: "Your account is not active",
       });
     }
 
-    const isPasswordValid = await bcrypt.compare(
+    const passwordValid = await bcrypt.compare(
       password,
       user.password_hash || ""
     );
 
-    if (!isPasswordValid) {
+    if (!passwordValid) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
@@ -75,43 +134,17 @@ router.post("/login", async (req, res) => {
     let stockist = null;
     let agency = null;
 
-    /**
-     * Stockist login validation
-     */
     if (user.user_type === "stockist") {
-      const stockistResult = await pool.query(
-        `
-        select
-          id,
-          user_profile_id,
-          gst_number,
-          business_name,
-          contact_person,
-          mobile,
-          email,
-          address_line1,
-          address_line2,
-          city,
-          state,
-          pincode,
-          status
-        from public.stockists
-        where user_profile_id = $1
-        limit 1
-        `,
-        [user.id]
-      );
+      stockist = await getStockistProfile(user.id);
 
-      if (stockistResult.rowCount === 0) {
+      if (!stockist) {
         return res.status(403).json({
           success: false,
           message: "Stockist profile not found",
         });
       }
 
-      stockist = stockistResult.rows[0];
-
-      if (stockist.status !== "active") {
+      if (String(stockist.status || "").toLowerCase() !== "active") {
         return res.status(403).json({
           success: false,
           message: "Stockist account is inactive",
@@ -119,58 +152,15 @@ router.post("/login", async (req, res) => {
       }
     }
 
-    /**
-     * Agency login validation
-     */
     if (user.user_type === "agency") {
-      const agencyResult = await pool.query(
-        `
-        select
-          a.id,
-          a.stockist_id,
-          a.user_profile_id,
-          a.gst_number,
-          a.business_name,
-          a.contact_person,
-          a.mobile,
-          a.email,
-          a.address_line1,
-          a.address_line2,
-          a.city,
-          a.state,
-          a.pincode,
-          a.status,
+      agency = await getAgencyProfile(user.id);
 
-          s.business_name as stockist_business_name,
-          s.status as stockist_status
-        from public.agencies a
-        join public.stockists s on s.id = a.stockist_id
-        where a.user_profile_id = $1
-        limit 1
-        `,
-        [user.id]
-      );
+      const agencyError = validateAgencySupplier(agency);
 
-      if (agencyResult.rowCount === 0) {
+      if (agencyError) {
         return res.status(403).json({
           success: false,
-          message: "Agency profile not found",
-        });
-      }
-
-      agency = agencyResult.rows[0];
-
-      if (agency.status !== "active") {
-        return res.status(403).json({
-          success: false,
-          message: "Agency account is inactive",
-        });
-      }
-
-      if (agency.stockist_status !== "active") {
-        return res.status(403).json({
-          success: false,
-          message: "Parent stockist is inactive",
+          message: agencyError,
         });
       }
     }
@@ -184,11 +174,16 @@ router.post("/login", async (req, res) => {
       customer_type: user.customer_type,
       stockist_id: stockist?.id || agency?.stockist_id || null,
       agency_id: agency?.id || null,
+      fulfillment_source: agency?.fulfillment_source || "stockist",
     };
 
-    const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, {
-      expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-    });
+    const token = jwt.sign(
+      tokenPayload,
+      process.env.JWT_SECRET,
+      {
+        expiresIn: process.env.JWT_EXPIRES_IN || "7d",
+      }
+    );
 
     return res.json({
       success: true,
@@ -204,6 +199,7 @@ router.post("/login", async (req, res) => {
         status: user.status,
         stockist_id: tokenPayload.stockist_id,
         agency_id: tokenPayload.agency_id,
+        fulfillment_source: tokenPayload.fulfillment_source,
       },
       profile: {
         stockist,
@@ -211,8 +207,6 @@ router.post("/login", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("DISTRIBUTOR LOGIN ERROR:", error);
-
     return res.status(500).json({
       success: false,
       message: "Distributor login failed",
@@ -221,31 +215,21 @@ router.post("/login", async (req, res) => {
   }
 });
 
-/**
- * Distributor Me API
- *
- * GET /api/distributor/auth/me
- */
 router.get("/me", async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
+    const authorization = req.headers.authorization || "";
 
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    if (!authorization.startsWith("Bearer ")) {
       return res.status(401).json({
         success: false,
         message: "Unauthorized. Token missing",
       });
     }
 
-    const token = authHeader.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    if (!["stockist", "agency"].includes(decoded.user_type)) {
-      return res.status(403).json({
-        success: false,
-        message: "Distributor access only",
-      });
-    }
+    const decoded = jwt.verify(
+      authorization.slice(7),
+      process.env.JWT_SECRET
+    );
 
     const userResult = await pool.query(
       `
@@ -274,41 +258,15 @@ router.get("/me", async (req, res) => {
 
     const user = userResult.rows[0];
 
-    let stockist = null;
-    let agency = null;
+    const stockist =
+      user.user_type === "stockist"
+        ? await getStockistProfile(user.id)
+        : null;
 
-    if (user.user_type === "stockist") {
-      const stockistResult = await pool.query(
-        `
-        select *
-        from public.stockists
-        where user_profile_id = $1
-        limit 1
-        `,
-        [user.id]
-      );
-
-      stockist = stockistResult.rows[0] || null;
-    }
-
-    if (user.user_type === "agency") {
-      const agencyResult = await pool.query(
-        `
-        select
-          a.*,
-          s.business_name as stockist_business_name,
-          s.gst_number as stockist_gst_number,
-          s.status as stockist_status
-        from public.agencies a
-        join public.stockists s on s.id = a.stockist_id
-        where a.user_profile_id = $1
-        limit 1
-        `,
-        [user.id]
-      );
-
-      agency = agencyResult.rows[0] || null;
-    }
+    const agency =
+      user.user_type === "agency"
+        ? await getAgencyProfile(user.id)
+        : null;
 
     return res.json({
       success: true,
@@ -319,8 +277,6 @@ router.get("/me", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("DISTRIBUTOR ME ERROR:", error);
-
     return res.status(401).json({
       success: false,
       message: "Invalid or expired token",
