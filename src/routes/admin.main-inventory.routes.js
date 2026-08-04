@@ -32,7 +32,7 @@ async function findProductBySku(client, sku) {
   const result = await client.query(
     `select id, sku, name
      from products
-     where sku = $1
+    where upper(sku) = upper($1)
      limit 1`,
     [sku]
   );
@@ -82,7 +82,13 @@ async function insertTransaction(client, payload) {
   );
 }
 
-async function upsertInventoryBySku(client, row, userId, transactionType = "bulk_upload") {
+async function upsertInventoryBySku(
+  client,
+  row,
+  userId,
+  transactionType = "bulk_upload",
+  options = {}
+) {
   const sku = clean(row.sku).toUpperCase();
 
   if (!sku) {
@@ -106,15 +112,25 @@ async function upsertInventoryBySku(client, row, userId, transactionType = "bulk
 
   const product = await findProductBySku(client, sku);
 
-  const existingResult = await client.query(
-    `select *
-     from main_inventory
-     where sku = $1
-     limit 1`,
-    [sku]
+const existingResult = await client.query(
+  `select *
+   from main_inventory
+   where upper(sku) = upper($1)
+   limit 1`,
+  [sku]
+);
+
+const existing = existingResult.rows[0];
+
+if (existing && options.rejectExisting) {
+  const error = new Error(
+    `SKU ${sku} already exists in main inventory`
   );
 
-  const existing = existingResult.rows[0];
+  error.code = "DUPLICATE_SKU";
+  throw error;
+}
+
 
   const oldTotalStock = existing ? Number(existing.total_stock || 0) : 0;
   const oldReservedStock = existing ? Number(existing.reserved_stock || 0) : 0;
@@ -300,6 +316,56 @@ router.get("/", async (req, res) => {
 /**
  * GET one main inventory record
  */
+/**
+ * CHECK WHETHER A MAIN-INVENTORY SKU ALREADY EXISTS
+ */
+router.get("/check-sku/:sku", async (req, res) => {
+  try {
+    const sku = clean(req.params.sku).toUpperCase();
+
+    if (!sku) {
+      return res.status(400).json({
+        success: false,
+        message: "SKU is required",
+      });
+    }
+
+    const result = await db.query(
+      `select
+        id,
+        sku,
+        item_name,
+        total_stock,
+        reserved_stock,
+        allocated_stock,
+        available_stock,
+        min_stock_level,
+        product_link_status,
+        product_id,
+        remarks,
+        is_active
+       from main_inventory
+       where upper(sku) = upper($1)
+       and is_active = true
+       limit 1`,
+      [sku]
+    );
+
+    return res.json({
+      success: true,
+      exists: result.rows.length > 0,
+      data: result.rows[0] || null,
+    });
+  } catch (error) {
+    console.error("Check main inventory SKU error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to check SKU",
+    });
+  }
+});
+
 router.get("/:id", async (req, res) => {
   try {
     const result = await db.query(
@@ -348,12 +414,15 @@ router.post("/", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const inventory = await upsertInventoryBySku(
-      client,
-      req.body,
-      req.user.id,
-      "stock_in"
-    );
+const inventory = await upsertInventoryBySku(
+  client,
+  req.body,
+  req.user.id,
+  "stock_in",
+  {
+    rejectExisting: true,
+  }
+);
 
     await client.query("COMMIT");
 
@@ -364,12 +433,17 @@ router.post("/", async (req, res) => {
     });
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Create main inventory error:", error);
 
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to save main inventory",
-    });
+console.error("Create main inventory error:", error);
+
+return res
+  .status(error.code === "DUPLICATE_SKU" ? 409 : 500)
+  .json({
+    success: false,
+    code: error.code || "SAVE_FAILED",
+    message:
+      error.message || "Failed to save main inventory",
+  });
   } finally {
     client.release();
   }
@@ -679,84 +753,193 @@ router.post("/link-products", async (req, res) => {
  * Optional:
  * item_name
  */
-router.post("/bulk-upload", upload.single("file"), async (req, res) => {
-  const client = await db.pool.connect();
+/**
+ * BULK UPLOAD OR VALIDATE MAIN INVENTORY
+ *
+ * CSV columns:
+ * sku,item_name,total_stock,reserved_stock,min_stock_level,remarks
+ */
+router.post(
+  "/bulk-upload",
+  upload.single("file"),
+  async (req, res) => {
+    const validateOnly =
+      String(req.query.validate_only).toLowerCase() ===
+      "true";
 
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: "CSV file is required",
-      });
-    }
+    const client = await db.pool.connect();
 
-    const rows = [];
-
-    await new Promise((resolve, reject) => {
-      Readable.from(req.file.buffer)
-        .pipe(csvParser())
-        .on("data", (row) => rows.push(row))
-        .on("end", resolve)
-        .on("error", reject);
-    });
-
-    const results = [];
-
-    await client.query("BEGIN");
-
-    for (let index = 0; index < rows.length; index++) {
-      try {
-        const inventory = await upsertInventoryBySku(
-          client,
-          rows[index],
-          req.user.id,
-          "bulk_upload"
-        );
-
-        results.push({
-          row: index + 1,
-          success: true,
-          sku: inventory.sku,
-          item_name: inventory.item_name,
-          total_stock: inventory.total_stock,
-          reserved_stock: inventory.reserved_stock,
-          allocated_stock: inventory.allocated_stock,
-          available_stock: inventory.available_stock,
-          min_stock_level: inventory.min_stock_level,
-          product_link_status: inventory.product_link_status,
-          product_id: inventory.product_id,
-        });
-      } catch (rowError) {
-        results.push({
-          row: index + 1,
+    try {
+      if (!req.file) {
+        return res.status(400).json({
           success: false,
-          sku: rows[index]?.sku,
-          message: rowError.message,
+          message: "CSV file is required",
         });
       }
+
+      const rows = [];
+
+      await new Promise((resolve, reject) => {
+        Readable.from(req.file.buffer)
+          .pipe(
+            csvParser({
+              mapHeaders: ({ header }) =>
+                String(header || "")
+                  .trim()
+                  .toLowerCase(),
+            })
+          )
+          .on("data", (row) => rows.push(row))
+          .on("end", resolve)
+          .on("error", reject);
+      });
+
+      if (rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "The CSV file has no data rows",
+        });
+      }
+
+      const results = [];
+      const fileSkus = new Set();
+
+      await client.query("BEGIN");
+
+      for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        const rowNumber = index + 2;
+        const sku = clean(row.sku).toUpperCase();
+
+        try {
+          if (!sku) {
+            throw new Error("SKU is required");
+          }
+
+          if (
+            !/^[A-Z0-9][A-Z0-9._-]*$/i.test(sku)
+          ) {
+            throw new Error(
+              "SKU may contain only letters, numbers, hyphens, dots and underscores"
+            );
+          }
+
+          if (fileSkus.has(sku)) {
+            throw new Error(
+              `Duplicate SKU ${sku} in uploaded CSV`
+            );
+          }
+
+          fileSkus.add(sku);
+
+          if (!clean(row.item_name)) {
+            throw new Error("Item name is required");
+          }
+
+          const inventory =
+            await upsertInventoryBySku(
+              client,
+              {
+                ...row,
+                sku,
+              },
+              req.user.id,
+              "bulk_upload",
+              {
+                rejectExisting: true,
+              }
+            );
+
+          results.push({
+            row: rowNumber,
+            success: true,
+            sku: inventory.sku,
+            item_name: inventory.item_name,
+            total_stock: Number(
+              inventory.total_stock || 0
+            ),
+            reserved_stock: Number(
+              inventory.reserved_stock || 0
+            ),
+            allocated_stock: Number(
+              inventory.allocated_stock || 0
+            ),
+            available_stock: Number(
+              inventory.available_stock || 0
+            ),
+            min_stock_level: Number(
+              inventory.min_stock_level || 0
+            ),
+            product_link_status:
+              inventory.product_link_status,
+            product_id: inventory.product_id,
+            message: validateOnly
+              ? "Valid and ready to import"
+              : "Inventory created",
+          });
+        } catch (rowError) {
+          results.push({
+            row: rowNumber,
+            success: false,
+            sku,
+            item_name: clean(row.item_name),
+            message:
+              rowError.message || "Validation failed",
+          });
+        }
+      }
+
+      if (validateOnly) {
+        await client.query("ROLLBACK");
+      } else {
+        await client.query("COMMIT");
+      }
+
+      const successfulRows = results.filter(
+        (row) => row.success
+      ).length;
+
+      const failedRows = results.filter(
+        (row) => !row.success
+      ).length;
+
+      return res.json({
+        success: true,
+        validate_only: validateOnly,
+        message: validateOnly
+          ? "CSV validation completed"
+          : "Main inventory import completed",
+        total_rows: rows.length,
+        processed: successfulRows,
+        valid: successfulRows,
+        failed: failedRows,
+        invalid: failedRows,
+        results,
+      });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "Bulk upload rollback error:",
+          rollbackError
+        );
+      }
+
+      console.error(
+        "Bulk upload main inventory error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message || "Bulk upload failed",
+      });
+    } finally {
+      client.release();
     }
-
-    await client.query("COMMIT");
-
-    res.json({
-      success: true,
-      message: "Main inventory bulk upload processed",
-      total_rows: rows.length,
-      processed: results.filter((r) => r.success).length,
-      failed: results.filter((r) => !r.success).length,
-      results,
-    });
-  } catch (error) {
-    await client.query("ROLLBACK");
-    console.error("Bulk upload main inventory error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: error.message || "Bulk upload failed",
-    });
-  } finally {
-    client.release();
   }
-});
+);
 
 module.exports = router;
