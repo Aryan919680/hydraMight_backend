@@ -45,9 +45,13 @@ async function getChannel(client, code) {
     [channelCode]
   );
 
-  if (result.rows.length === 0) {
-    throw new Error(`Invalid channel: ${code}`);
-  }
+if (result.rows.length === 0) {
+  throw createHttpError(
+    `Invalid channel: ${code}`,
+    400,
+    "INVALID_CHANNEL"
+  );
+}
 
   return result.rows[0];
 }
@@ -67,31 +71,67 @@ async function getSubChannel(client, channelId, code) {
     [channelId, subCode]
   );
 
-  if (result.rows.length === 0) {
-    throw new Error(`Invalid sub_channel: ${code}`);
-  }
+if (result.rows.length === 0) {
+  throw createHttpError(
+    `Invalid channel: ${code}`,
+    400,
+    "INVALID_CHANNEL"
+  );
+}
 
   return result.rows[0];
 }
 
-async function findMainInventoryBySku(client, sku) {
+async function findMainInventoryBySku(
+  client,
+  sku,
+  options = {}
+) {
   const finalSku = normalizeSku(sku);
+
+  if (!finalSku) {
+    const error = new Error("SKU is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lockClause = options.lock
+    ? "for update"
+    : "";
 
   const result = await client.query(
     `select *
      from main_inventory
-     where sku = $1
+     where upper(sku) = upper($1)
      and is_active = true
-     limit 1`,
+     limit 1
+     ${lockClause}`,
     [finalSku]
   );
 
   if (result.rows.length === 0) {
-    throw new Error(`Main inventory not found for SKU ${finalSku}`);
+    const error = new Error(
+      `Main inventory not found for SKU ${finalSku}`
+    );
+
+    error.statusCode = 404;
+    throw error;
   }
 
   return result.rows[0];
 }
+
+
+const createHttpError = (
+  message,
+  statusCode = 400,
+  code = "VALIDATION_ERROR"
+) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = code;
+  return error;
+};
 
 async function findOrCreateLocation(client, payload) {
   const {
@@ -112,9 +152,13 @@ async function findOrCreateLocation(client, payload) {
    */
   console.log("payload for location:", payload);
   if (channel.code === "ecom") {
-    if (!service_location_id) {
-      throw new Error("service_location_id is required for ecom inventory allocation");
-    }
+   if (!service_location_id) {
+  throw createHttpError(
+    "Service location is required for Ecom allocation",
+    400,
+    "SERVICE_LOCATION_REQUIRED"
+  );
+}
 
     const serviceLocationResult = await client.query(
       `select *
@@ -126,8 +170,12 @@ async function findOrCreateLocation(client, payload) {
     );
 
     if (serviceLocationResult.rows.length === 0) {
-      throw new Error("Active service location not found");
-    }
+  throw createHttpError(
+    "Active service location not found",
+    404,
+    "SERVICE_LOCATION_NOT_FOUND"
+  );
+}
 
     const sl = serviceLocationResult.rows[0];
 
@@ -182,9 +230,13 @@ async function findOrCreateLocation(client, payload) {
    * DISTRIBUTION / WHITE LABEL:
    * use inventory_locations custom location
    */
-  if (!location_code && !location_name) {
-    throw new Error("location_code or location_name is required");
-  }
+ if (!location_code && !location_name) {
+  throw createHttpError(
+    "Location is required for this channel",
+    400,
+    "LOCATION_REQUIRED"
+  );
+}
 
   const finalCode = normalizeCode(location_code || location_name);
   const finalName = clean(location_name || location_code);
@@ -281,8 +333,29 @@ async function insertAllocationTransaction(client, payload) {
 
 async function upsertAllocation(client, row, userId, transactionType = "allocate") {
   const sku = normalizeSku(row.sku);
-  const channelCode = clean(row.channel);
-  const subChannelCode = clean(row.sub_channel);
+const channelCode = normalizeCode(
+  row.channel
+);
+
+const subChannelCode = normalizeCode(
+  row.sub_channel
+);
+
+if (!sku) {
+  throw createHttpError(
+    "SKU is required",
+    400,
+    "SKU_REQUIRED"
+  );
+}
+
+if (!channelCode) {
+  throw createHttpError(
+    "Channel is required",
+    400,
+    "CHANNEL_REQUIRED"
+  );
+}
 
   if (!sku) throw new Error("sku is required");
   if (!channelCode) throw new Error("channel is required");
@@ -293,21 +366,45 @@ async function upsertAllocation(client, row, userId, transactionType = "allocate
 
   if (channel.code === "ecom") {
     if (!subChannelCode) {
-      throw new Error("sub_channel is required for ecom channel");
-    }
+  throw createHttpError(
+    "Sub-channel is required for Ecom allocation",
+    400,
+    "SUB_CHANNEL_REQUIRED"
+  );
+}
 
     subChannel = await getSubChannel(client, channel.id, subChannelCode);
 
-    if (!["household", "commercial"].includes(subChannel.code)) {
-      throw new Error("ecom sub_channel must be household or commercial");
-    }
+    if (
+  !["household", "commercial"].includes(
+    subChannel.code
+  )
+) {
+  throw createHttpError(
+    "Ecom sub-channel must be household or commercial",
+    400,
+    "INVALID_ECOM_SUB_CHANNEL"
+  );
+}
   } else {
     if (subChannelCode) {
       subChannel = await getSubChannel(client, channel.id, subChannelCode);
     }
   }
 
-  const mainInventory = await findMainInventoryBySku(client, sku);
+  /*
+ * Lock the main inventory row until the allocation
+ * transaction commits. This prevents two requests
+ * from allocating the same available stock.
+ */
+const mainInventory =
+  await findMainInventoryBySku(
+    client,
+    sku,
+    {
+      lock: true,
+    }
+  );
 
 const location = await findOrCreateLocation(client, {
   channel,
@@ -336,22 +433,50 @@ const location = await findOrCreateLocation(client, {
   const reservedStock = toNumber(row.reserved_stock, 0);
   const minStock = toNumber(row.min_stock_level, 0);
 
-  if (allocatedStock < 0 || reservedStock < 0 || minStock < 0) {
-    throw new Error(`Stock values cannot be negative for SKU ${sku}`);
-  }
+if (
+  !Number.isFinite(allocatedStock) ||
+  allocatedStock <= 0
+) {
+  throw createHttpError(
+    `Allocated stock must be greater than zero for SKU ${sku}`,
+    400,
+    "INVALID_ALLOCATED_STOCK"
+  );
+}
 
-  if (reservedStock > allocatedStock) {
-    throw new Error(`reserved_stock cannot be greater than allocated_stock for SKU ${sku}`);
-  }
+if (
+  !Number.isFinite(reservedStock) ||
+  reservedStock < 0 ||
+  !Number.isFinite(minStock) ||
+  minStock < 0
+) {
+  throw createHttpError(
+    `Stock values cannot be negative for SKU ${sku}`,
+    400,
+    "INVALID_STOCK_VALUE"
+  );
+}
+
+if (reservedStock > allocatedStock) {
+  throw createHttpError(
+    `Reserved stock cannot exceed allocated stock for SKU ${sku}`,
+    400,
+    "RESERVED_EXCEEDS_ALLOCATED"
+  );
+}
 
   const existingResult = await client.query(
-    `select *
-     from inventory_allocations
-     where main_inventory_id = $1
-     and channel_id = $2
-     and coalesce(sub_channel_id::text, '') = coalesce($3::text, '')
-     and location_id = $4
-     limit 1`,
+  `select *
+   from inventory_allocations
+   where main_inventory_id = $1
+   and channel_id = $2
+   and coalesce(
+     sub_channel_id::text,
+     ''
+   ) = coalesce($3::text, '')
+   and location_id = $4
+   limit 1
+   for update`,
     [
       mainInventory.id,
       channel.id,
@@ -370,11 +495,13 @@ const location = await findOrCreateLocation(client, {
 
   const mainAvailableBefore = Number(mainInventory.available_stock || 0);
 
-  if (deltaAllocated > mainAvailableBefore) {
-    throw new Error(
-      `Insufficient main inventory for SKU ${sku}. Available: ${mainAvailableBefore}, Required extra: ${deltaAllocated}`
-    );
-  }
+if (deltaAllocated > mainAvailableBefore) {
+  throw createHttpError(
+    `Insufficient main inventory for SKU ${sku}. Available: ${mainAvailableBefore}, additional stock required: ${deltaAllocated}`,
+    409,
+    "INSUFFICIENT_MAIN_INVENTORY"
+  );
+}
 
   const nextAvailable = allocatedStock - reservedStock;
   const status = getStatus(nextAvailable, minStock);
@@ -460,7 +587,74 @@ const location = await findOrCreateLocation(client, {
     mainInventory.id,
   ]);
 
-  return allocation;
+  const completeResult = await client.query(
+  `select
+    ia.id,
+    ia.main_inventory_id,
+    ia.sku,
+
+    ia.channel_id,
+    ic.code as channel_code,
+    ic.name as channel_name,
+
+    ia.sub_channel_id,
+    isc.code as sub_channel_code,
+    isc.name as sub_channel_name,
+
+    ia.location_id,
+    il.name as location_name,
+    il.code as location_code,
+    il.city,
+    il.state,
+    il.pincode,
+    il.location_type,
+    il.service_location_id,
+
+    sl.name as service_location_name,
+    sl.city as service_location_city,
+    sl.state as service_location_state,
+    sl.pincode as service_location_pincode,
+
+    ia.allocated_stock,
+    ia.reserved_stock,
+    ia.available_stock,
+    ia.min_stock_level,
+    ia.is_out_of_stock,
+    ia.is_low_stock,
+    ia.remarks,
+    ia.created_at,
+    ia.updated_at,
+
+    mi.item_name,
+    mi.total_stock as main_total_stock,
+    mi.reserved_stock as main_reserved_stock,
+    mi.allocated_stock as main_allocated_stock,
+    mi.available_stock as main_available_stock,
+    mi.product_link_status
+
+   from inventory_allocations ia
+
+   join main_inventory mi
+     on mi.id = ia.main_inventory_id
+
+   join inventory_channels ic
+     on ic.id = ia.channel_id
+
+   left join inventory_sub_channels isc
+     on isc.id = ia.sub_channel_id
+
+   join inventory_locations il
+     on il.id = ia.location_id
+
+   left join service_locations sl
+     on sl.id = il.service_location_id
+
+   where ia.id = $1
+   limit 1`,
+  [allocation.id]
+);
+
+return completeResult.rows[0];
 }
 
 /**
@@ -485,6 +679,168 @@ router.get("/channels", async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to fetch channels",
+    });
+  }
+});
+
+
+
+/**
+ * SEARCH MAIN INVENTORY SKUs FOR ALLOCATION
+ *
+ * GET /api/admin/inventory-allocations/sku-search
+ * Query:
+ *   search=floor
+ *   limit=10
+ */
+router.get("/sku-search", async (req, res) => {
+  try {
+    const search = clean(req.query.search);
+    const requestedLimit = Number(
+      req.query.limit || 10
+    );
+
+    const limit = Math.min(
+      Math.max(
+        Number.isFinite(requestedLimit)
+          ? requestedLimit
+          : 10,
+        1
+      ),
+      50
+    );
+
+    if (search.length < 2) {
+      return res.json({
+        success: true,
+        data: [],
+      });
+    }
+
+    const result = await db.query(
+      `select
+        mi.id,
+        mi.sku,
+        mi.item_name,
+        mi.total_stock,
+        mi.reserved_stock,
+        mi.allocated_stock,
+        mi.available_stock,
+        mi.min_stock_level,
+        mi.product_id,
+        mi.product_link_status,
+        mi.is_out_of_stock,
+        mi.is_low_stock,
+        mi.remarks,
+        mi.updated_at,
+
+        coalesce(
+          json_agg(
+            json_build_object(
+              'id', ia.id,
+              'channel_code', ic.code,
+              'channel_name', ic.name,
+              'sub_channel_code', isc.code,
+              'sub_channel_name', isc.name,
+              'location_id', il.id,
+              'location_code', il.code,
+              'location_name',
+                coalesce(sl.name, il.name),
+              'city',
+                coalesce(sl.city, il.city),
+              'state',
+                coalesce(sl.state, il.state),
+              'pincode',
+                coalesce(sl.pincode, il.pincode),
+              'service_location_id',
+                il.service_location_id,
+              'allocated_stock',
+                ia.allocated_stock,
+              'reserved_stock',
+                ia.reserved_stock,
+              'available_stock',
+                ia.available_stock
+            )
+          ) filter (
+            where ia.id is not null
+          ),
+          '[]'::json
+        ) as allocations
+
+       from main_inventory mi
+
+       left join inventory_allocations ia
+         on ia.main_inventory_id = mi.id
+        and ia.is_active = true
+
+       left join inventory_channels ic
+         on ic.id = ia.channel_id
+
+       left join inventory_sub_channels isc
+         on isc.id = ia.sub_channel_id
+
+       left join inventory_locations il
+         on il.id = ia.location_id
+
+       left join service_locations sl
+         on sl.id = il.service_location_id
+
+       where mi.is_active = true
+       and (
+         mi.sku ilike $1
+         or coalesce(mi.item_name, '') ilike $1
+       )
+
+       group by
+         mi.id,
+         mi.sku,
+         mi.item_name,
+         mi.total_stock,
+         mi.reserved_stock,
+         mi.allocated_stock,
+         mi.available_stock,
+         mi.min_stock_level,
+         mi.product_id,
+         mi.product_link_status,
+         mi.is_out_of_stock,
+         mi.is_low_stock,
+         mi.remarks,
+         mi.updated_at
+
+       order by
+         case
+           when upper(mi.sku) = upper($2)
+           then 0
+           when upper(mi.sku) like upper($2) || '%'
+           then 1
+           else 2
+         end,
+         mi.item_name asc nulls last,
+         mi.sku asc
+
+       limit $3`,
+      [
+        `%${search}%`,
+        search,
+        limit,
+      ]
+    );
+
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error(
+      "Search allocation SKUs error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error.message ||
+        "Failed to search inventory SKUs",
     });
   }
 });
@@ -649,10 +1005,16 @@ router.get("/", async (req, res) => {
     const params = [];
     const conditions = ["ia.is_active = true"];
 
-    if (sku) {
-      params.push(normalizeSku(sku));
-      conditions.push(`ia.sku = $${params.length}`);
-    }
+if (sku) {
+  params.push(`%${clean(sku)}%`);
+
+  conditions.push(
+    `(
+      ia.sku ilike $${params.length}
+      or coalesce(mi.item_name, '') ilike $${params.length}
+    )`
+  );
+}
 
     if (channel) {
       params.push(channel);
@@ -769,14 +1131,34 @@ router.post("/", async (req, res) => {
       message: "Inventory allocation saved successfully",
       data: allocation,
     });
-  } catch (error) {
+  }  catch (error) {
+  try {
     await client.query("ROLLBACK");
-    console.error("Create allocation error:", error);
-    res.status(500).json({
+  } catch (rollbackError) {
+    console.error(
+      "Create allocation rollback error:",
+      rollbackError
+    );
+  }
+
+  console.error(
+    "Create allocation error:",
+    error
+  );
+
+  return res
+    .status(error.statusCode || 500)
+    .json({
       success: false,
-      message: error.message || "Failed to save allocation",
+      code:
+        error.code ||
+        "ALLOCATION_SAVE_FAILED",
+      message:
+        error.message ||
+        "Failed to save allocation",
     });
-  } finally {
+}
+finally {
     client.release();
   }
 });
@@ -797,15 +1179,22 @@ router.put("/:id", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const currentResult = await client.query(
-      `select ia.*, mi.available_stock as main_available_stock
-       from inventory_allocations ia
-       join main_inventory mi on mi.id = ia.main_inventory_id
-       where ia.id = $1
-       and ia.is_active = true
-       limit 1`,
-      [req.params.id]
-    );
+  const currentResult = await client.query(
+  `select
+    ia.*,
+    mi.available_stock
+      as main_available_stock
+   from inventory_allocations ia
+
+   join main_inventory mi
+     on mi.id = ia.main_inventory_id
+
+   where ia.id = $1
+   and ia.is_active = true
+   limit 1
+   for update of ia, mi`,
+  [req.params.id]
+);
 
     if (currentResult.rows.length === 0) {
       await client.query("ROLLBACK");
@@ -821,11 +1210,19 @@ router.put("/:id", async (req, res) => {
     const nextReserved = toNumber(reserved_stock, 0);
     const nextMin = toNumber(min_stock_level, 0);
 
-    if (nextAllocated < 0 || nextReserved < 0 || nextMin < 0) {
+    if (
+  !Number.isFinite(nextAllocated) ||
+  nextAllocated <= 0 ||
+  !Number.isFinite(nextReserved) ||
+  nextReserved < 0 ||
+  !Number.isFinite(nextMin) ||
+  nextMin < 0
+) {
       await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
-        message: "Stock values cannot be negative",
+        message:
+  "Allocated stock must be greater than zero and other stock values cannot be negative",
       });
     }
 
@@ -915,13 +1312,32 @@ router.put("/:id", async (req, res) => {
       data: updated,
     });
   } catch (error) {
+  try {
     await client.query("ROLLBACK");
-    console.error("Update allocation error:", error);
-    res.status(500).json({
+  } catch (rollbackError) {
+    console.error(
+      "Update allocation rollback error:",
+      rollbackError
+    );
+  }
+
+  console.error(
+    "Update allocation error:",
+    error
+  );
+
+  return res
+    .status(error.statusCode || 500)
+    .json({
       success: false,
-      message: error.message || "Failed to update allocation",
+      code:
+        error.code ||
+        "ALLOCATION_UPDATE_FAILED",
+      message:
+        error.message ||
+        "Failed to update allocation",
     });
-  } finally {
+}finally {
     client.release();
   }
 });
@@ -935,14 +1351,15 @@ router.delete("/:id", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const currentResult = await client.query(
-      `select *
-       from inventory_allocations
-       where id = $1
-       and is_active = true
-       limit 1`,
-      [req.params.id]
-    );
+   const currentResult = await client.query(
+  `select *
+   from inventory_allocations
+   where id = $1
+   and is_active = true
+   limit 1
+   for update`,
+  [req.params.id]
+);
 
     if (currentResult.rows.length === 0) {
       await client.query("ROLLBACK");
@@ -1070,7 +1487,12 @@ router.post("/bulk-upload", upload.single("file"), async (req, res) => {
 
     await new Promise((resolve, reject) => {
       Readable.from(req.file.buffer)
-        .pipe(csvParser())
+        .pipe(
+  csvParser({
+    mapHeaders: ({ header }) =>
+      clean(header).toLowerCase(),
+  })
+)
         .on("data", (row) => rows.push(row))
         .on("end", resolve)
         .on("error", reject);
@@ -1080,33 +1502,73 @@ router.post("/bulk-upload", upload.single("file"), async (req, res) => {
 
     await client.query("BEGIN");
 
-    for (let index = 0; index < rows.length; index++) {
-      try {
-        const allocation = await upsertAllocation(
-          client,
-          rows[index],
-          req.user.id,
-          "bulk_upload"
-        );
+  for (
+  let index = 0;
+  index < rows.length;
+  index++
+) {
+  const savepoint =
+    `allocation_row_${index}`;
 
-        results.push({
-          row: index + 1,
-          success: true,
-          sku: allocation.sku,
-          allocation_id: allocation.id,
-          allocated_stock: allocation.allocated_stock,
-          reserved_stock: allocation.reserved_stock,
-          available_stock: allocation.available_stock,
-        });
-      } catch (rowError) {
-        results.push({
-          row: index + 1,
-          success: false,
-          sku: rows[index]?.sku,
-          message: rowError.message,
-        });
-      }
+  try {
+    await client.query(
+      `savepoint ${savepoint}`
+    );
+
+    const allocation =
+      await upsertAllocation(
+        client,
+        rows[index],
+        req.user.id,
+        "bulk_upload"
+      );
+
+    await client.query(
+      `release savepoint ${savepoint}`
+    );
+
+    results.push({
+      row: index + 2,
+      success: true,
+      sku: allocation.sku,
+      allocation_id: allocation.id,
+      allocated_stock:
+        allocation.allocated_stock,
+      reserved_stock:
+        allocation.reserved_stock,
+      available_stock:
+        allocation.available_stock,
+      message:
+        "Allocation imported successfully",
+    });
+  } catch (rowError) {
+    try {
+      await client.query(
+        `rollback to savepoint ${savepoint}`
+      );
+
+      await client.query(
+        `release savepoint ${savepoint}`
+      );
+    } catch (savepointError) {
+      console.error(
+        "Bulk allocation savepoint error:",
+        savepointError
+      );
     }
+
+    results.push({
+      row: index + 2,
+      success: false,
+      sku: normalizeSku(
+        rows[index]?.sku
+      ),
+      message:
+        rowError.message ||
+        "Allocation import failed",
+    });
+  }
+}
 
     await client.query("COMMIT");
 
