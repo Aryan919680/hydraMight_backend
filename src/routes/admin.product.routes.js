@@ -30,39 +30,88 @@ function validateEcomProduct({ ecom_channel, quantity_unit }) {
   return null;
 }
 
-async function linkProductWithMainInventory(client, productId, sku) {
-  const inventoryResult = await client.query(
-    `select id
-     from main_inventory
-     where upper(sku) = upper($1)
-     and is_active = true
-     limit 1`,
-    [sku]
-  );
-
-  const inventoryLinked = inventoryResult.rows.length > 0;
-
-  if (inventoryLinked) {
+async function linkProductWithMainInventory(
+  client,
+  productId,
+  sku,
+  userId
+) {
+  const inventoryResult =
     await client.query(
-      `update main_inventory
-       set product_id = $1,
-           product_link_status = 'linked',
-           updated_at = now()
-       where upper(sku) = upper($2)
-       and is_active = true`,
-      [productId, sku]
+      `select
+        id,
+        product_id,
+        product_link_status
+       from main_inventory
+       where upper(sku) =
+             upper($1)
+       and is_active = true
+       limit 1
+       for update`,
+      [sku]
     );
 
-    await client.query(
-      `update products
-       set inventory_link_status = 'linked',
-           updated_at = now()
-       where id = $1`,
-      [productId]
-    );
+  const inventory =
+    inventoryResult.rows[0];
+
+  if (!inventory) {
+    return false;
   }
 
-  return inventoryLinked;
+  /*
+   * Do not silently replace a manual link
+   * pointing to another product.
+   */
+  if (
+    inventory.product_id &&
+    inventory.product_id !== productId &&
+    inventory.product_link_status ===
+      "linked"
+  ) {
+    return false;
+  }
+
+  await client.query(
+    `update main_inventory
+     set
+      product_id = $1,
+      product_link_status =
+        'linked',
+      product_link_type =
+        'auto',
+      product_linked_at =
+        now(),
+      product_linked_by =
+        $3,
+      sku_role =
+        coalesce(
+          sku_role,
+          'primary'
+        ),
+      updated_by = $3,
+      updated_at = now()
+
+     where upper(sku) =
+           upper($2)
+     and is_active = true`,
+    [
+      productId,
+      sku,
+      userId,
+    ]
+  );
+
+  await client.query(
+    `update products
+     set
+      inventory_link_status =
+        'linked',
+      updated_at = now()
+     where id = $1`,
+    [productId]
+  );
+
+  return true;
 }
 
 async function replaceProductServiceLocations(client, productId, serviceLocationIds) {
@@ -478,17 +527,14 @@ router.post("/", async (req, res) => {
 
     const product = productResult.rows[0];
 
-    if (inventoryLinked) {
-      await client.query(
-        `update main_inventory
-         set product_id = $1,
-             product_link_status = 'linked',
-             updated_at = now()
-         where upper(sku) = upper($2)
-         and is_active = true`,
-        [product.id, sku]
-      );
-    }
+if (inventoryLinked) {
+  await linkProductWithMainInventory(
+    client,
+    product.id,
+    product.sku,
+    req.user.id
+  );
+}
 
     await replaceProductServiceLocations(client, product.id, service_location_ids);
     await replaceProductImages(client, product.id, product.name, images);
@@ -705,7 +751,12 @@ router.put("/:id", async (req, res) => {
 
     const product = result.rows[0];
 
-    await linkProductWithMainInventory(client, product.id, product.sku);
+    await linkProductWithMainInventory(
+  client,
+  product.id,
+  product.sku,
+  req.user.id
+);
 
     if (Array.isArray(service_location_ids)) {
       await replaceProductServiceLocations(client, product.id, service_location_ids);
@@ -788,13 +839,18 @@ router.delete("/:id", async (req, res) => {
     );
 
     await client.query(
-      `update main_inventory
-       set product_id = null,
-           product_link_status = 'pending',
-           updated_at = now()
-       where product_id = $1`,
-      [req.params.id]
-    );
+  `update main_inventory
+   set
+    product_id = null,
+    product_link_status =
+      'pending',
+    product_link_type = null,
+    product_linked_at = null,
+    product_linked_by = null,
+    updated_at = now()
+   where product_id = $1`,
+  [req.params.id]
+);
 
     await client.query(
       `insert into audit_logs

@@ -18,6 +18,32 @@ const upload = multer({
 
 const clean = (value) => String(value || "").trim();
 
+const normalizeSku = (value) =>
+  clean(value).toUpperCase();
+
+const normalizeLinkReason = (value) => {
+  const reason = clean(value).toLowerCase();
+
+  if (
+    reason === "no_product" ||
+    reason === "sku_mismatch"
+  ) {
+    return reason;
+  }
+
+  return "";
+};
+
+const normalizeLinkType = (value) => {
+  const type = clean(value).toLowerCase();
+
+  if (type === "auto" || type === "manual") {
+    return type;
+  }
+
+  return "";
+};
+
 const toNumber = (value, fallback = 0) => {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
@@ -28,11 +54,22 @@ const getStockStatus = (availableStock, minStock) => ({
   isLowStock: availableStock > 0 && availableStock <= minStock,
 });
 
-async function findProductBySku(client, sku) {
+async function findProductBySku(
+  client,
+  sku
+) {
   const result = await client.query(
-    `select id, sku, name
+    `select
+      id,
+      sku,
+      name,
+      portal_type,
+      ecom_channel,
+      inventory_link_status,
+      is_active
      from products
-    where upper(sku) = upper($1)
+     where upper(sku) = upper($1)
+     and is_active = true
      limit 1`,
     [sku]
   );
@@ -159,16 +196,20 @@ if (existing && options.rejectExisting) {
       is_out_of_stock,
       is_low_stock,
       product_link_status,
-      is_active,
-      remarks,
-      created_by,
-      updated_by,
-      created_at,
-      updated_at
+product_link_type,
+product_linked_at,
+product_linked_by,
+sku_role,
+is_active,
+remarks,
+created_by,
+updated_by,
+created_at,
+updated_at
      )
      values
      (
-      $1,$2,$3,$4,$5,0,$6,$7,$8,$9,true,$10,$11,$11,now(),now()
+      $1,$2,$3,$4,$5,0,$6,$7,$8,$9,$10,$11,$12,'primary',true,$13,$14,$14,now(),now()
      )
      on conflict (sku)
      do update set
@@ -179,29 +220,71 @@ if (existing && options.rejectExisting) {
       min_stock_level = excluded.min_stock_level,
       is_out_of_stock = excluded.is_out_of_stock,
       is_low_stock = excluded.is_low_stock,
-      product_link_status =
-        case
-          when coalesce(main_inventory.product_id, excluded.product_id) is null then 'pending'
-          else 'linked'
-        end,
+     product_link_status =
+  case
+    when coalesce(
+      main_inventory.product_id,
+      excluded.product_id
+    ) is null
+    then 'pending'
+    else 'linked'
+  end,
+
+product_link_type =
+  case
+    when main_inventory.product_id is not null
+    then main_inventory.product_link_type
+    when excluded.product_id is not null
+    then 'auto'
+    else null
+  end,
+
+product_linked_at =
+  case
+    when main_inventory.product_id is not null
+    then main_inventory.product_linked_at
+    when excluded.product_id is not null
+    then now()
+    else null
+  end,
+
+product_linked_by =
+  case
+    when main_inventory.product_id is not null
+    then main_inventory.product_linked_by
+    when excluded.product_id is not null
+    then excluded.updated_by
+    else null
+  end,
+
+sku_role =
+  coalesce(
+    main_inventory.sku_role,
+    'primary'
+  ),
       is_active = true,
       remarks = excluded.remarks,
       updated_by = excluded.updated_by,
       updated_at = now()
      returning *`,
     [
-      product ? product.id : null,
-      sku,
-      itemName || (product ? product.name : null),
-      totalStock,
-      reservedStock,
-      minStock,
-      status.isOutOfStock,
-      status.isLowStock,
-      product ? "linked" : "pending",
-      remarks || "Main inventory updated",
-      userId,
-    ]
+  product ? product.id : null,
+  sku,
+  itemName || (product ? product.name : null),
+  totalStock,
+  reservedStock,
+  minStock,
+  status.isOutOfStock,
+  status.isLowStock,
+
+  product ? "linked" : "pending",
+  product ? "auto" : null,
+  product ? new Date() : null,
+  product ? userId : null,
+
+  remarks || "Main inventory updated",
+  userId,
+]
   );
 
   const inventory = result.rows[0];
@@ -277,6 +360,10 @@ router.get("/", async (req, res) => {
         mi.is_out_of_stock,
         mi.is_low_stock,
         mi.product_link_status,
+        mi.product_link_type,
+mi.product_linked_at,
+mi.product_linked_by,
+mi.sku_role,
         mi.remarks,
         mi.created_at,
         mi.updated_at,
@@ -404,6 +491,857 @@ router.get("/:id", async (req, res) => {
     });
   }
 });
+
+/**
+ * PRODUCT LINKING STATISTICS
+ */
+router.get(
+  "/product-links/stats",
+  async (req, res) => {
+    try {
+      const result = await db.query(
+        `select
+          count(*)::int as total_skus,
+
+          count(*) filter (
+            where product_id is not null
+            and product_link_status = 'linked'
+            and coalesce(
+              product_link_type,
+              'auto'
+            ) = 'auto'
+          )::int as auto_linked,
+
+          count(*) filter (
+            where product_id is not null
+            and product_link_status = 'linked'
+            and product_link_type = 'manual'
+          )::int as manually_linked,
+
+          count(*) filter (
+            where product_id is null
+            or product_link_status <> 'linked'
+          )::int as unlinked,
+
+          count(*) filter (
+            where (
+              product_id is null
+              or product_link_status <> 'linked'
+            )
+            and not exists (
+              select 1
+              from products p
+              where p.is_active = true
+              and (
+                upper(p.sku) = upper(mi.sku)
+                or lower(trim(p.name)) =
+                   lower(trim(mi.item_name))
+              )
+            )
+          )::int as no_product_exists,
+
+          count(*) filter (
+            where (
+              product_id is null
+              or product_link_status <> 'linked'
+            )
+            and not exists (
+              select 1
+              from products exact_product
+              where exact_product.is_active = true
+              and upper(exact_product.sku) =
+                  upper(mi.sku)
+            )
+            and exists (
+              select 1
+              from products name_product
+              where name_product.is_active = true
+              and lower(trim(name_product.name)) =
+                  lower(trim(mi.item_name))
+            )
+          )::int as sku_mismatch
+
+         from main_inventory mi
+         where mi.is_active = true`
+      );
+
+      return res.json({
+        success: true,
+        data: result.rows[0],
+      });
+    } catch (error) {
+      console.error(
+        "Get product linking stats error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to fetch product linking statistics",
+      });
+    }
+  }
+);
+
+
+/**
+ * GET PRODUCT LINKING RECORDS
+ *
+ * Query:
+ * status=linked|unlinked
+ * search=
+ * reason=no_product|sku_mismatch
+ * catalogue=ecom|distribution|white_label
+ * link_type=auto|manual
+ */
+router.get(
+  "/product-links",
+  async (req, res) => {
+    try {
+      const {
+        status,
+        search,
+        reason,
+        catalogue,
+        link_type,
+      } = req.query;
+
+      const params = [];
+      const conditions = [
+        "mi.is_active = true",
+      ];
+
+      if (status === "linked") {
+        conditions.push(
+          "mi.product_id is not null"
+        );
+
+        conditions.push(
+          "mi.product_link_status = 'linked'"
+        );
+      }
+
+      if (status === "unlinked") {
+        conditions.push(
+          `(mi.product_id is null
+            or mi.product_link_status <> 'linked')`
+        );
+      }
+
+      if (search) {
+        params.push(
+          `%${clean(search)}%`
+        );
+
+        const index = params.length;
+
+        conditions.push(
+          `(
+            mi.sku ilike $${index}
+            or coalesce(mi.item_name, '') ilike $${index}
+            or coalesce(p.name, '') ilike $${index}
+            or coalesce(p.sku, '') ilike $${index}
+          )`
+        );
+      }
+
+      const finalLinkType =
+        normalizeLinkType(link_type);
+
+      if (finalLinkType) {
+        params.push(finalLinkType);
+
+        conditions.push(
+          `mi.product_link_type = $${params.length}`
+        );
+      }
+
+      if (catalogue) {
+        const finalCatalogue =
+          clean(catalogue).toLowerCase();
+
+        if (
+          finalCatalogue === "ecom"
+        ) {
+          conditions.push(
+            `(
+              p.portal_type in (
+                'household',
+                'commercial',
+                'ecom'
+              )
+              or p.ecom_channel in (
+                'household',
+                'commercial'
+              )
+            )`
+          );
+        }
+
+        if (
+          finalCatalogue ===
+          "distribution"
+        ) {
+          conditions.push(
+            `p.portal_type in (
+              'distribution',
+              'distributor'
+            )`
+          );
+        }
+
+        if (
+          finalCatalogue ===
+          "white_label"
+        ) {
+          conditions.push(
+            `p.portal_type in (
+              'white_label',
+              'whitelabel'
+            )`
+          );
+        }
+      }
+
+      const finalReason =
+        normalizeLinkReason(reason);
+
+      if (
+        finalReason === "no_product"
+      ) {
+        conditions.push(
+          `not exists (
+            select 1
+            from products rp
+            where rp.is_active = true
+            and (
+              upper(rp.sku) = upper(mi.sku)
+              or lower(trim(rp.name)) =
+                 lower(trim(mi.item_name))
+            )
+          )`
+        );
+      }
+
+      if (
+        finalReason === "sku_mismatch"
+      ) {
+        conditions.push(
+          `not exists (
+            select 1
+            from products exact_product
+            where exact_product.is_active = true
+            and upper(exact_product.sku) =
+                upper(mi.sku)
+          )`
+        );
+
+        conditions.push(
+          `exists (
+            select 1
+            from products name_product
+            where name_product.is_active = true
+            and lower(trim(name_product.name)) =
+                lower(trim(mi.item_name))
+          )`
+        );
+      }
+
+      const result = await db.query(
+        `select
+          mi.id
+            as main_inventory_id,
+
+          mi.sku,
+          mi.item_name,
+          mi.total_stock,
+          mi.reserved_stock,
+          mi.allocated_stock,
+          mi.available_stock,
+
+          mi.product_id,
+          mi.product_link_status,
+          mi.product_link_type,
+          mi.product_linked_at,
+          mi.product_linked_by,
+          mi.sku_role,
+
+          p.name
+            as product_name,
+          p.sku
+            as product_sku,
+          p.portal_type
+            as product_portal,
+          p.ecom_channel,
+
+          case
+            when mi.product_id is not null
+              and mi.product_link_status = 'linked'
+            then null
+
+            when exists (
+              select 1
+              from products exact_product
+              where exact_product.is_active = true
+              and upper(exact_product.sku) =
+                  upper(mi.sku)
+            )
+            then 'sku_match_available'
+
+            when exists (
+              select 1
+              from products name_product
+              where name_product.is_active = true
+              and lower(trim(name_product.name)) =
+                  lower(trim(mi.item_name))
+            )
+            then 'sku_mismatch'
+
+            else 'no_product'
+          end as reason
+
+         from main_inventory mi
+
+         left join products p
+           on p.id = mi.product_id
+
+         where ${conditions.join(
+           " and "
+         )}
+
+         order by
+           case
+             when mi.product_id is null
+             then 0
+             else 1
+           end,
+           mi.updated_at desc`,
+        params
+      );
+
+      return res.json({
+        success: true,
+        data: result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "Get inventory product links error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to fetch inventory product links",
+      });
+    }
+  }
+);
+
+
+/**
+ * SEARCH PRODUCTS FOR MANUAL LINKING
+ */
+router.get(
+  "/:id/product-candidates",
+  async (req, res) => {
+    try {
+      const search = clean(
+        req.query.search
+      );
+
+      const requestedLimit = Number(
+        req.query.limit || 30
+      );
+
+      const limit = Math.min(
+        Math.max(
+          Number.isFinite(
+            requestedLimit
+          )
+            ? requestedLimit
+            : 30,
+          1
+        ),
+        100
+      );
+
+      const inventoryResult =
+        await db.query(
+          `select
+            id,
+            sku,
+            item_name,
+            product_id
+           from main_inventory
+           where id = $1
+           and is_active = true
+           limit 1`,
+          [req.params.id]
+        );
+
+      if (
+        inventoryResult.rows.length ===
+        0
+      ) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Main inventory not found",
+        });
+      }
+
+      const inventory =
+        inventoryResult.rows[0];
+
+      const params = [
+        inventory.sku,
+        search
+          ? `%${search}%`
+          : "%",
+        limit,
+      ];
+
+      const result = await db.query(
+        `select
+          p.id,
+          p.sku,
+          p.name,
+          p.portal_type,
+          p.ecom_channel,
+          p.inventory_link_status,
+
+          case
+            when upper(p.sku) =
+                 upper($1)
+            then true
+            else false
+          end as exact_sku_match,
+
+          case
+            when exists (
+              select 1
+              from main_inventory other_mi
+              where other_mi.product_id = p.id
+              and other_mi.is_active = true
+              and other_mi.id <> $4
+            )
+            then true
+            else false
+          end as already_linked_elsewhere
+
+         from products p
+
+         where p.is_active = true
+
+         and (
+           p.sku ilike $2
+           or p.name ilike $2
+           or coalesce(
+             p.brand,
+             ''
+           ) ilike $2
+         )
+
+         order by
+           case
+             when upper(p.sku) =
+                  upper($1)
+             then 0
+             else 1
+           end,
+           p.name asc
+
+         limit $3`,
+        [
+          inventory.sku,
+          search
+            ? `%${search}%`
+            : "%",
+          limit,
+          inventory.id,
+        ]
+      );
+
+      return res.json({
+        success: true,
+        data: result.rows,
+      });
+    } catch (error) {
+      console.error(
+        "Get product candidates error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to search products",
+      });
+    }
+  }
+);
+
+
+/**
+ * MANUALLY LINK INVENTORY TO PRODUCT
+ */
+router.post(
+  "/:id/link-product",
+  async (req, res) => {
+    const client =
+      await db.pool.connect();
+
+    try {
+      const productId =
+        clean(req.body.product_id);
+
+      if (!productId) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "product_id is required",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      const inventoryResult =
+        await client.query(
+          `select *
+           from main_inventory
+           where id = $1
+           and is_active = true
+           limit 1
+           for update`,
+          [req.params.id]
+        );
+
+      if (
+        inventoryResult.rows.length ===
+        0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(404).json({
+          success: false,
+          message:
+            "Main inventory not found",
+        });
+      }
+
+      const inventory =
+        inventoryResult.rows[0];
+
+      const productResult =
+        await client.query(
+          `select
+            id,
+            sku,
+            name,
+            portal_type,
+            inventory_link_status
+           from products
+           where id = $1
+           and is_active = true
+           limit 1
+           for update`,
+          [productId]
+        );
+
+      if (
+        productResult.rows.length ===
+        0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(404).json({
+          success: false,
+          message:
+            "Active product not found",
+        });
+      }
+
+      const product =
+        productResult.rows[0];
+
+      const conflictResult =
+        await client.query(
+          `select
+            id,
+            sku,
+            item_name
+           from main_inventory
+           where product_id = $1
+           and is_active = true
+           and id <> $2
+           limit 1`,
+          [
+            product.id,
+            inventory.id,
+          ]
+        );
+
+      if (
+        conflictResult.rows.length > 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(409).json({
+          success: false,
+          message:
+            `This product is already linked to inventory SKU ${conflictResult.rows[0].sku}`,
+        });
+      }
+
+      /*
+       * If this inventory was previously
+       * linked with a different product,
+       * mark that old product as pending.
+       */
+      if (
+        inventory.product_id &&
+        inventory.product_id !==
+          product.id
+      ) {
+        await client.query(
+          `update products
+           set inventory_link_status =
+                 'pending',
+               updated_at = now()
+           where id = $1`,
+          [inventory.product_id]
+        );
+      }
+
+      const linkType =
+        normalizeSku(inventory.sku) ===
+        normalizeSku(product.sku)
+          ? "auto"
+          : "manual";
+
+      const result =
+        await client.query(
+          `update main_inventory
+           set
+            product_id = $1,
+            product_link_status =
+              'linked',
+            product_link_type = $2,
+            product_linked_at = now(),
+            product_linked_by = $3,
+            sku_role =
+              coalesce(
+                sku_role,
+                'primary'
+              ),
+            updated_by = $3,
+            updated_at = now()
+           where id = $4
+           returning *`,
+          [
+            product.id,
+            linkType,
+            req.user.id,
+            inventory.id,
+          ]
+        );
+
+      await client.query(
+        `update products
+         set
+          inventory_link_status =
+            'linked',
+          updated_at = now()
+         where id = $1`,
+        [product.id]
+      );
+
+      await client.query("COMMIT");
+
+      return res.json({
+        success: true,
+        message:
+          linkType === "auto"
+            ? "Inventory linked to matching product SKU"
+            : "Inventory manually linked to product",
+        data: {
+          ...result.rows[0],
+          product_name:
+            product.name,
+          product_sku:
+            product.sku,
+          product_portal:
+            product.portal_type,
+        },
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "Manual inventory product link error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to link inventory to product",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+
+/**
+ * UNLINK INVENTORY FROM PRODUCT
+ */
+router.post(
+  "/:id/unlink-product",
+  async (req, res) => {
+    const client =
+      await db.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const inventoryResult =
+        await client.query(
+          `select *
+           from main_inventory
+           where id = $1
+           and is_active = true
+           limit 1
+           for update`,
+          [req.params.id]
+        );
+
+      if (
+        inventoryResult.rows.length ===
+        0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(404).json({
+          success: false,
+          message:
+            "Main inventory not found",
+        });
+      }
+
+      const inventory =
+        inventoryResult.rows[0];
+
+      if (!inventory.product_id) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Inventory is already unlinked",
+        });
+      }
+
+      const oldProductId =
+        inventory.product_id;
+
+      const result =
+        await client.query(
+          `update main_inventory
+           set
+            product_id = null,
+            product_link_status =
+              'pending',
+            product_link_type = null,
+            product_linked_at = null,
+            product_linked_by = null,
+            updated_by = $1,
+            updated_at = now()
+           where id = $2
+           returning *`,
+          [
+            req.user.id,
+            inventory.id,
+          ]
+        );
+
+      const remainingLink =
+        await client.query(
+          `select 1
+           from main_inventory
+           where product_id = $1
+           and is_active = true
+           limit 1`,
+          [oldProductId]
+        );
+
+      if (
+        remainingLink.rows.length ===
+        0
+      ) {
+        await client.query(
+          `update products
+           set
+            inventory_link_status =
+              'pending',
+            updated_at = now()
+           where id = $1`,
+          [oldProductId]
+        );
+      }
+
+      await client.query("COMMIT");
+
+      return res.json({
+        success: true,
+        message:
+          "Product unlinked from inventory",
+        data: result.rows[0],
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "Unlink inventory product error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to unlink product",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
 
 /**
  * CREATE / UPSERT main inventory by SKU
@@ -713,36 +1651,143 @@ router.get("/:id/transactions", async (req, res) => {
 /**
  * Link product after product is created in future.
  */
-router.post("/link-products", async (req, res) => {
-  try {
-    const result = await db.query(
-      `update main_inventory mi
-       set
-        product_id = p.id,
-        product_link_status = 'linked',
-        updated_at = now()
-       from products p
-       where upper(p.sku) = upper(mi.sku)
-       and mi.product_id is null
-       and mi.is_active = true
-       returning mi.*`,
-      []
-    );
+/**
+ * AUTO LINK ALL MATCHING SKUs
+ */
+router.post(
+  "/link-products",
+  async (req, res) => {
+    const client =
+      await db.pool.connect();
 
-    res.json({
-      success: true,
-      message: "Inventory linked with products where SKU matched",
-      linked_count: result.rows.length,
-      data: result.rows,
-    });
-  } catch (error) {
-    console.error("Link inventory products error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to link inventory with products",
-    });
+    try {
+      await client.query("BEGIN");
+
+      /*
+       * Only link inventory that is currently
+       * unlinked. Do not overwrite a manual
+       * association.
+       */
+      const result =
+        await client.query(
+          `update main_inventory mi
+           set
+            product_id = p.id,
+            product_link_status =
+              'linked',
+            product_link_type =
+              'auto',
+            product_linked_at =
+              now(),
+            product_linked_by =
+              $1,
+            sku_role =
+              coalesce(
+                mi.sku_role,
+                'primary'
+              ),
+            updated_by = $1,
+            updated_at = now()
+
+           from products p
+
+           where
+            upper(p.sku) =
+              upper(mi.sku)
+
+           and p.is_active = true
+           and mi.is_active = true
+
+           and (
+             mi.product_id is null
+             or mi.product_link_status
+                <> 'linked'
+           )
+
+           and not exists (
+             select 1
+             from main_inventory other_mi
+             where
+              other_mi.product_id =
+                p.id
+             and
+              other_mi.is_active =
+                true
+             and
+              other_mi.id <>
+                mi.id
+           )
+
+           returning
+            mi.id,
+            mi.sku,
+            mi.item_name,
+            mi.product_id,
+            mi.product_link_status,
+            mi.product_link_type`
+          ,
+          [req.user.id]
+        );
+
+      if (result.rows.length > 0) {
+        const productIds =
+          result.rows
+            .map(
+              (row) =>
+                row.product_id
+            )
+            .filter(Boolean);
+
+        if (
+          productIds.length > 0
+        ) {
+          await client.query(
+            `update products
+             set
+              inventory_link_status =
+                'linked',
+              updated_at = now()
+             where id = any($1::uuid[])`,
+            [productIds]
+          );
+        }
+      }
+
+      await client.query("COMMIT");
+
+      return res.json({
+        success: true,
+        message:
+          result.rows.length > 0
+            ? `${result.rows.length} inventory SKU(s) auto-linked`
+            : "No new matching inventory SKUs found",
+        linked_count:
+          result.rows.length,
+        data: result.rows,
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "Auto-link inventory products error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to auto-link inventory products",
+      });
+    } finally {
+      client.release();
+    }
   }
-});
+);
 
 /**
  * BULK UPLOAD MAIN INVENTORY
