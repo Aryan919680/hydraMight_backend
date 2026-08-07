@@ -453,44 +453,6 @@ router.get("/check-sku/:sku", async (req, res) => {
   }
 });
 
-router.get("/:id", async (req, res) => {
-  try {
-    const result = await db.query(
-      `select
-        mi.*,
-        p.name as product_name,
-        p.slug as product_slug,
-        p.portal_type,
-        p.quantity_value,
-        p.quantity_unit,
-        p.brand,
-        p.unit
-       from main_inventory mi
-       left join products p
-         on p.id = mi.product_id
-       where mi.id = $1`,
-      [req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Main inventory not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0],
-    });
-  } catch (error) {
-    console.error("Get main inventory detail error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to fetch main inventory",
-    });
-  }
-});
 
 /**
  * PRODUCT LINKING STATISTICS
@@ -584,6 +546,7 @@ router.get(
     }
   }
 );
+
 
 
 /**
@@ -842,6 +805,11 @@ router.get(
 );
 
 
+
+
+
+
+
 /**
  * SEARCH PRODUCTS FOR MANUAL LINKING
  */
@@ -985,6 +953,46 @@ router.get(
     }
   }
 );
+
+
+router.get("/:id", async (req, res) => {
+  try {
+    const result = await db.query(
+      `select
+        mi.*,
+        p.name as product_name,
+        p.slug as product_slug,
+        p.portal_type,
+        p.quantity_value,
+        p.quantity_unit,
+        p.brand,
+        p.unit
+       from main_inventory mi
+       left join products p
+         on p.id = mi.product_id
+       where mi.id = $1`,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Main inventory not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Get main inventory detail error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch main inventory",
+    });
+  }
+});
 
 
 /**
