@@ -376,32 +376,33 @@ router.post("/", async (req, res) => {
   const client = await db.pool.connect();
 
   try {
-    const {
-      category_id,
-      name,
-      slug,
-      sku,
-      short_description,
-      description,
-      brand,
+   const {
+  category_id,
+  name,
+  slug,
+  sku,
+  short_description,
+  description,
+  brand,
 
-      ecom_channel,
-      quantity_value,
-      quantity_unit,
+  ecom_channel,
+  quantity_value,
+  quantity_unit,
 
-      unit,
-      weight,
+  unit,
+  weight,
+  hsn_code,
 
-      mrp,
-      selling_price,
-      currency,
+  mrp,
+  selling_price,
+  currency,
 
-      is_featured,
-      is_available_for_sale,
+  is_featured,
+  is_available_for_sale,
 
-      service_location_ids,
-      images,
-    } = req.body;
+  service_location_ids,
+  images,
+} = req.body;
 
     if (!category_id || !name || !sku || !ecom_channel || !quantity_unit) {
       return res.status(400).json({
@@ -475,7 +476,8 @@ router.post("/", async (req, res) => {
         quantity_unit,
 
         unit,
-        weight,
+weight,
+hsn_code,
 
         mrp,
         selling_price,
@@ -493,9 +495,9 @@ router.post("/", async (req, res) => {
        (
         $1,$2,$3,$4,$5,$6,$7,
         $8,$8,$9,$10,
-        $11,$12,
-        $13,$14,$15,
-        $16,$17,$18,true,$19,now(),now()
+        $11,$12,$13,
+$14,$15,$16,
+$17,$18,$19,true,$20,now(),now()
        )
        returning *`,
       [
@@ -512,16 +514,23 @@ router.post("/", async (req, res) => {
         quantity_unit,
 
         unit || null,
-        weight ? Number(weight) : null,
+weight ? Number(weight) : null,
+hsn_code || null,
 
-        mrp !== undefined ? Number(mrp) : null,
-        selling_price !== undefined ? Number(selling_price) : null,
-        currency || "INR",
+mrp !== undefined
+  ? Number(mrp)
+  : null,
 
-        Boolean(is_featured),
-        is_available_for_sale !== false,
-        inventoryLinked ? "linked" : "pending",
-        req.user.id,
+selling_price !== undefined
+  ? Number(selling_price)
+  : null,
+
+currency || "INR",
+
+Boolean(is_featured),
+is_available_for_sale !== false,
+inventoryLinked ? "linked" : "pending",
+req.user.id,
       ]
     );
 
