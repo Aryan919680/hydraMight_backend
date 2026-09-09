@@ -24,6 +24,8 @@ const adminOrderRoutes = require("./routes/admin.orders.routes");
 const stockistPurchaseRoutes = require("./routes/stockist.purchase.routes");
 const agencyFlowRoutes = require("./routes/agencyFlow.routes");
 const adminAgencyFlowRoutes = require("./routes/adminAgencyFlow.routes");
+const customerCapitalRoutes =
+  require("./routes/customer.capital.routes");
 const app = express();
 
 /**
@@ -89,6 +91,10 @@ app.use("/api/distributor/catalog", distributorCatalogRoutes);
 app.use("/api/distributor/orders", distributorOrderRoutes);
 
 app.use("/api/customer/orders", customerSalesOrderRoutes);
+app.use(
+  "/api/customer/capital",
+  customerCapitalRoutes
+);
 app.use("/api/customer", customerProductRoutes);
 
 app.use("/api/stockist", stockistPurchaseRoutes);
