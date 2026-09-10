@@ -479,53 +479,73 @@ router.post("/sips", async (req, res) => {
         existing.rows.length > 0;
     }
 
-    const result =
-      await client.query(
-        `
-      insert into capital_sip_plans
-(
-  customer_id,
-  lead_id,
-  account_number,
-  monthly_amount,
-  tenure_years,
-  debit_day,
-  assumed_return_percent,
-  projected_value,
-  expected_value,
-  status,
-  created_at,
-  updated_at
-)
-        values
-(
-  $1,
-  $2,
-  $3,
-  $4,
-  $5,
-  $6,
-  $7,
-  $8,
-  $8,
-  'pending',
-  now(),
-  now()
-)
+   const today = new Date();
 
-        returning *
-        `,
-        [
-          customerId,
-          leadId,
-          accountNumber,
-          amount,
-          tenure,
-          debitDay,
-          assumedReturn,
-          projectedValue,
-        ]
-      );
+let nextInvestmentDate = new Date(
+  today.getFullYear(),
+  today.getMonth(),
+  debitDay
+);
+
+if (nextInvestmentDate <= today) {
+  nextInvestmentDate = new Date(
+    today.getFullYear(),
+    today.getMonth() + 1,
+    debitDay
+  );
+}
+
+const nextInvestmentDateValue =
+  nextInvestmentDate.toISOString().split("T")[0];
+
+const result = await client.query(
+  `
+  insert into capital_sip_plans
+  (
+    customer_id,
+    lead_id,
+    account_number,
+    monthly_amount,
+    tenure_years,
+    debit_day,
+    assumed_return_percent,
+    projected_value,
+    expected_value,
+    next_investment_date,
+    status,
+    created_at,
+    updated_at
+  )
+  values
+  (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $8,
+    $9,
+    'pending',
+    now(),
+    now()
+  )
+  returning *
+  `,
+  [
+    customerId,
+    leadId,
+    accountNumber,
+    amount,
+    tenure,
+    debitDay,
+    assumedReturn,
+    projectedValue,
+    nextInvestmentDateValue,
+  ]
+);
 
     await client.query(
       `
