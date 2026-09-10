@@ -237,7 +237,7 @@ const allowedServices = [
         full_name,
         mobile,
         email,
-        primary_goal,
+        service,
         status,
         created_at,
         updated_at
@@ -266,8 +266,8 @@ const allowedServices = [
         email =
           excluded.email,
 
-        primary_goal =
-          excluded.primary_goal,
+        service =
+          excluded.service,
 
         status =
           'active',
@@ -282,7 +282,7 @@ const allowedServices = [
         finalName,
         finalMobile,
         finalEmail,
-        primary_goal,
+        service,
       ]
     );
 
