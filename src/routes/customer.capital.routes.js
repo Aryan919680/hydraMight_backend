@@ -482,34 +482,36 @@ router.post("/sips", async (req, res) => {
     const result =
       await client.query(
         `
-        insert into capital_sip_plans
-        (
-          customer_id,
-          lead_id,
-          account_number,
-          monthly_amount,
-          tenure_years,
-          debit_day,
-          assumed_return_percent,
-          projected_value,
-          status,
-          created_at,
-          updated_at
-        )
+      insert into capital_sip_plans
+(
+  customer_id,
+  lead_id,
+  account_number,
+  monthly_amount,
+  tenure_years,
+  debit_day,
+  assumed_return_percent,
+  projected_value,
+  expected_value,
+  status,
+  created_at,
+  updated_at
+)
         values
-        (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8,
-          'pending',
-          now(),
-          now()
-        )
+(
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  $8,
+  $8,
+  'pending',
+  now(),
+  now()
+)
 
         returning *
         `,
