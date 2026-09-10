@@ -193,15 +193,12 @@ const allowedServices = [
   });
 }
 
-    if (
-      !allowedGoals.includes(primary_goal)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid primary goal",
-      });
-    }
+   if (!allowedServices.includes(service)) {
+  return res.status(400).json({
+    success: false,
+    message: "Invalid service selected",
+  });
+}
 
     const finalName =
       full_name ||
