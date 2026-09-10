@@ -249,7 +249,7 @@ const allowedServices = [
         $3,
         $4,
         $5,
-        'active',
+        'new',
         now(),
         now()
       )
@@ -270,7 +270,7 @@ const allowedServices = [
           excluded.service,
 
         status =
-          'active',
+          'new',
 
         updated_at =
           now()
