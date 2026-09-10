@@ -158,27 +158,40 @@ router.post("/leads", async (req, res) => {
   try {
     const customerId = req.customer.id;
 
-    const {
-      full_name,
-      mobile,
-      email,
-      primary_goal,
-    } = req.body;
+const {
+  full_name,
+  mobile,
+  email,
+  service,
+} = req.body;
 
-    const allowedGoals = [
-      "retirement",
-      "child_future",
-      "tax_saving",
-      "general_wealth",
-    ];
-
-    if (!primary_goal) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Primary goal is required",
-      });
-    }
+const allowedServices = [
+  "mutual_funds",
+  "tax_saving",
+  "child_future",
+  "retirement",
+  "fixed_deposits",
+  "insurance",
+  "bonds",
+  "home_loan",
+  "personal_loan",
+  "business_loan",
+  "loan_against_property",
+  "balance_transfer",
+  "commercial_property_loan",
+  "education_loan",
+  "used_car_loan",
+  "tractor_loan",
+  "used_bike_loan",
+  "working_capital_loan",
+  "overdraft_cash_credit",
+];
+  if (!service) {
+  return res.status(400).json({
+    success: false,
+    message: "Service is required",
+  });
+}
 
     if (
       !allowedGoals.includes(primary_goal)
